@@ -1,0 +1,7 @@
+data/
+runs/
+teachers/
+*.pth
+*.pt
+__pycache__/
+*.pyc
