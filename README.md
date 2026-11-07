@@ -23,7 +23,7 @@ L = ℓ(x, y) + λ · mean_{v ∈ V_t(x)} ℓ(v, y),
 
 ```bash
 pip install -r requirements.txt        # PyTorch with CUDA, numpy, pyarrow, pillow
-scripts/download_data.sh               # CIFAR-100, STL-10, Tiny-ImageNet -> ./data
+scripts/download_data.sh               # CIFAR-100, STL-10, Tiny-ImageNet, off-centre CIFAR-100 -> ./data
 ```
 
 Teachers:
@@ -40,6 +40,10 @@ All data is held on the GPU. Augmentation (reflection-padded random crop and hor
 scripts/cifar100.sh 0        # EP-KD, KD (standard schedule), KD with the same optimizer-step budget
 scripts/stl10.sh 0
 scripts/tinyimagenet.sh 0
+scripts/cifar100_ablations.sh 0   # every CIFAR-100 ablation (one component changed per run)
+scripts/canvas.sh 0          # off-centre CIFAR-100: EP-KD, random windows, downsampled image, KD with the same steps
+scripts/low_data.sh 0        # 10 / 25 / 50% of CIFAR-100 and label skew (subsets/*.json)
+scripts/cifar100_vit.sh 0    # ViT-S -> DeiT-T (see "Vision Transformers" below)
 ```
 
 Each run writes `config.json`, `train.jsonl` (one line per epoch), `best_test.pth`, `final.pth`, `latest.pt`
@@ -69,8 +73,29 @@ The 3 passes at the 16, 20 and 24 px stages give **2.2× the optimizer steps of 
 a full image plus a crop. Always compare against `--views 0 --passes 3,3,3,1,1` (KD with the same step budget)
 as well as standard KD.
 
-### Ablation options used during development
+### Ablations
 
+`scripts/cifar100_ablations.sh` runs every ablation. Each one changes a single component of the EP-KD command.
+
+| component | flags |
+|---|---|
+| no anchor (views only at restricted stages) | `--anchor 0` |
+| transported target p_T(·\|x) on views | `--view-target full` |
+| soft agreement weight ω = exp(−KL(p_T(v) ‖ p_T(x))/σ) | `--gate soft --sigma 0.5` |
+| reversed / shuffled budget | `--stage-order reverse` / `--stage-order shuffled` |
+| the top proposal only | `--view-set sal1,sal1,sal1` |
+| random windows: on the grid / anywhere, fixed per stage / anywhere, redrawn every pass | `--view-set rnd1,rnd2,rnd3` / `--view-set frn1,frn2,frn3` / `--free-random 1` |
+| least-salient windows | `--view-set low1,low2,low3` |
+| from 16 random windows per image (`--pool-k 16`), the most / least agreeing with p_T(·\|x), or 3 at random | `--view-set agr1,agr2,agr3` / `dis1,dis2,dis3` / `pol1,pol2,pol3` |
+| crop resized to the input size / masked window / whole image resized to the view size | `--view-resize 32` / `--view-type mask` / `--view-set down1,down2,down3` |
+| KD: EP-KD's schedule with 1 pass, more steps than EP-KD, function matching (Beyer et al., 2022) | `--views 0 --milestones 48,144,192,210` / `--passes 4,4,4,2,2` / `--fm-aug 1` |
+
+Data options:
+* `--dataset cifar100canvas` selects off-centre CIFAR-100: each image is pasted at a random position into a 64 × 64
+  canvas with a smooth background (`scripts/prepare_canvas.py`).
+* `--subset-manifest subsets/<name>.json` trains on a fixed subset of the training images (low-data, label skew).
+
+Other options from development:
 * `--view-set gt1,gt2,conf` (online, or with `--view-cache 1`): distinct label-evidence regions and the region
   behind the teacher's runner-up class. `confK` is the K-th ranked non-label class.
 * `--stage-view-sets "gt1,gt2,conf;gt1,gt2,conf;sal1,sal2,sal3;sal1"`: a different view family per stage.
@@ -79,7 +104,6 @@ as well as standard KD.
 * `--view-ce-mode valid`: CE on a view only if the teacher still predicts the label on it.
 * `--xview-w 1 --xview-eps 0.5`: additional full-image target on views with KL(p_T(x) || p_T(v)) ≤ ε.
 * `--size-mode verified --eps 0.5`: per-image budget from the smallest teacher-consistent view.
-* `--view-type mask`: keep the window in place and set the rest to the mean (instead of cropping).
 * `--amp 0`: fp32 instead of mixed precision.
 
 ## Vision Transformers (CIFAR-100 at 224 px)
@@ -127,27 +151,13 @@ loading uses 6 workers.
 The outputs are the same files as `train.py`. `train.jsonl` also records `side`, `view_D` (KL(p_T(x) ‖ p_T(v))),
 `img_s` and `data_wait`.
 
-## Results so far (WRN-40-2 → WRN-40-1, best test epoch)
-
-Preliminary numbers from development. They are not final paper numbers.
+## Results (WRN-40-2 → WRN-40-1, best test epoch, mean of 3 seeds)
 
 | dataset | teacher | KD (standard) | KD (same steps) | EP-KD |
 |---|---|---|---|---|
-| CIFAR-100 | 75.61 | 74.36 (seed 0) | 74.80 (seed 0) | **76.13 ± 0.25** (3 seeds: 76.42 / 76.01 / 75.97) |
-| STL-10 | 86.56 | 87.34 (seed 0) | 87.50 (seed 0) | **87.88** (seed 0) |
-| Tiny-ImageNet | 62.05 | 56.91 (seed 0) | running | running |
-
-Ablations, CIFAR-100, seed 0:
-
-| variant | best |
-|---|---|
-| no anchor (views only, otherwise identical) | 75.04 |
-| anchor + 1 sampled view per step, 1 pass | 75.31 |
-| same, random windows | 75.06 |
-| same, + reliability gate | 74.95 |
-| same, + label-validity CE and verified full-image target | 75.19 |
-| anchor + reasoning views (gt1, gt2, conf), 3 passes | 76.04 |
-| anchor + 5 reasoning views, 1 pass, views until the last epoch | 75.89 |
+| CIFAR-100 | 75.61 | 74.33 | 74.87 | **76.13** (76.42 / 76.01 / 75.97) |
+| STL-10 | 86.56 | 87.08 | 87.46 | **87.87** (87.88 / 87.83 / 87.90) |
+| Tiny-ImageNet | 62.05 | 57.10 | 59.14 | **60.19** (60.39 / 60.03 / 60.15) |
 
 ## Files
 
@@ -155,5 +165,7 @@ Ablations, CIFAR-100, seed 0:
 * `train_vit.py`: EP-KD and KD baselines for ViT students (token-window views, CLS-attention proposals).
 * `wrn.py`: Wide-ResNet (CRD / RepDistiller definition).
 * `prepare_data.py`: converts the STL-10 and Tiny-ImageNet parquet files to uint8 tensors.
-* `scripts/`: data download, teacher training, per-dataset run scripts, and the ViT teacher download
+* `subsets/`: fixed training subsets of CIFAR-100 (10 / 25 / 50% class-balanced; Dirichlet label skew α = 0.1–100).
+* `scripts/`: data download (`download_data.sh`, `prepare_canvas.py`), teacher training, per-dataset runs,
+  ablations (`cifar100_ablations.sh`, `canvas.sh`, `low_data.sh`), and the ViT teacher download
   (`get_vit_teacher.sh`, `convert_ofa_checkpoint.py`) and runs (`cifar100_vit.sh`).

@@ -3,7 +3,6 @@
 Evidence-Preserving Knowledge Distillation (EP-KD) trains the student on teacher-proposed restricted views of
 each image (native-resolution crops ranked by the teacher's class-activation map), under a progressive evidence
 budget that ends on the full image, while keeping the full-image distillation objective at every step.
-
 `--views 0` gives plain KD; `--teacher none` trains a network with cross-entropy (used for teachers).
 See README.md for the exact commands of the method, the baselines and the ablations.
 """
@@ -32,6 +31,9 @@ DATASETS = {
                   mean=(0.4467, 0.4398, 0.4066), std=(0.2603, 0.2566, 0.2713)),
     "tinyimagenet": dict(num_classes=200, size=64, pad=8,
                          mean=(0.4802, 0.4481, 0.3975), std=(0.2770, 0.2691, 0.2821)),
+    # CIFAR-100 pasted off-centre into a 64x64 smooth-background canvas (scripts/prepare_canvas.py)
+    "cifar100canvas": dict(num_classes=100, size=64, pad=8,
+                           mean=(0.5065, 0.4888, 0.4442), std=(0.2287, 0.2174, 0.2395)),
 }
 
 
@@ -204,12 +206,26 @@ def view_size_at(epoch, args):
     if args.size_sched == "random":  # interleaved control: any restricted size at every step
         sizes = args.view_sizes[:-1] if len(args.view_sizes) > 1 else args.view_sizes
         return sizes[int(torch.randint(len(sizes), (1,)))]
-    k = min(epoch // args.stage_epochs, len(args.view_sizes) - 1)
-    return args.view_sizes[k]
+    return args.view_sizes[stage_index(epoch, args)]
 
 
 def stage_index(epoch, args):
+    if getattr(args, "stage_plan", None):
+        return args.stage_plan[min(epoch, len(args.stage_plan) - 1)]
     return min(epoch // args.stage_epochs, len(args.view_sizes) - 1)
+
+
+def build_stage_plan(args):
+    """Stage index per epoch. forward: 0,0,..,1,1,..; reverse: last stage first; shuffled: the same multiset of
+    epochs per stage in a seeded random order (each stage keeps exactly stage_epochs epochs)."""
+    n = len(args.view_sizes)
+    plan = [min(e // args.stage_epochs, n - 1) for e in range(args.epochs)]
+    if args.stage_order == "reverse":
+        plan = [n - 1 - k for k in plan]
+    elif args.stage_order == "shuffled":
+        g = torch.Generator().manual_seed(1000 + args.seed)
+        plan = [plan[i] for i in torch.randperm(len(plan), generator=g).tolist()]
+    return plan
 
 
 def passes_at(epoch, args):
@@ -354,7 +370,7 @@ def make_views(x, y, t_full, cams, epoch, args, full, pass_idx=0):
     return groups
 
 
-# ----------------------------------------------------------------------------- cached views (old TGSC pipeline)
+# ----------------------------------------------------------------------------- cached views (fixed per stage)
 @torch.no_grad()
 def build_view_cache(teacher, trx, try_, aug, s, args):
     """Per-image view windows of size s on the clean (un-augmented) image, fixed for the whole stage.
@@ -364,6 +380,15 @@ def build_view_cache(teacher, trx, try_, aug, s, args):
     out = []
     members = args.view_set
     n_sal = max([int(m[3:]) for m in members if m.startswith("sal")] + [0])
+    n_rnd = max([int(m[3:]) for m in members if m.startswith("rnd")] + [0])
+    n_frn = max([int(m[3:]) for m in members if m.startswith("frn")] + [0])  # grid-free random, fixed per stage
+    n_low = max([int(m[3:]) for m in members if m.startswith("low")] + [0])  # least-salient grid windows
+    # agreement ladder (Prop. 2 test): agrK / disK / polK = K-th most-agreeing / least-agreeing / random member of ONE
+    # common pool of args.pool_k grid-free windows per image and stage (separate generator: other members unchanged)
+    n_pool = max([int(m[3:]) for m in members if m[:3] in ("agr", "dis", "pol")] + [0])
+    g_pool = torch.Generator(device=trx.device).manual_seed(104729 * (args.seed + 1) + s)
+    pool_kl = {}
+    g_rnd = torch.Generator(device=trx.device).manual_seed(7919 * (args.seed + 1) + s)
     n_gt = max([int(m[2:]) for m in members if m.startswith("gt")] + [0])
     confs = [m for m in members if m.startswith("conf")]
     for i in range(0, trx.size(0), 1000):
@@ -383,6 +408,48 @@ def build_view_cache(teacher, trx, try_, aug, s, args):
             for j in range(n_sal):
                 tj = top[:, min(j, k - 1)]
                 pos["sal%d" % (j + 1)] = ((tj // gw) * g, (tj % gw) * g)
+        if n_rnd:  # distinct windows drawn uniformly from the same grid (no teacher evidence)
+            g = args.grid_stride
+            gh = (full - s) // g + 1
+            k = min(n_rnd, gh * gh)
+            pick = torch.rand(x.size(0), gh * gh, device=x.device, generator=g_rnd).topk(k, 1).indices
+            for j in range(n_rnd):
+                tj = pick[:, min(j, k - 1)]
+                pos["rnd%d" % (j + 1)] = ((tj // gh) * g, (tj % gh) * g)
+        if n_low:  # K-th LEAST CAM mass window on the same grid as salK (control for Prop. 2)
+            g = args.grid_stride
+            mass = F.avg_pool2d(cam, s, stride=g)
+            gw = mass.size(-1)
+            k = min(n_low, mass[0].numel())
+            bot = mass.flatten(1).topk(k, 1, largest=False).indices
+            for j in range(n_low):
+                tj = bot[:, min(j, k - 1)]
+                pos["low%d" % (j + 1)] = ((tj // gw) * g, (tj % gw) * g)
+        if n_frn:  # grid-free uniform pixel offsets, drawn once per image and stage (same diversity as salK)
+            for j in range(n_frn):
+                rc = torch.randint(0, full - s + 1, (x.size(0), 2), device=x.device, generator=g_rnd)
+                pos["frn%d" % (j + 1)] = (rc[:, 0], rc[:, 1])
+        if n_pool:
+            K = args.pool_k
+            prc = torch.randint(0, full - s + 1, (x.size(0), K, 2), device=x.device, generator=g_pool)
+            kls = []
+            for q in range(K):
+                v = crop_batch(x, prc[:, q, 0], prc[:, q, 1], s)
+                with torch.autocast("cuda", dtype=torch.float16, enabled=args.amp):
+                    tv = teacher_forward(teacher, v)[0].float()
+                kls.append(kl_teacher(t.float(), tv, args.ver_tau))
+            KL = torch.stack(kls, 1)  # [B, K], KL(p_T(.|x) || p_T(.|v)) on the clean image
+            asc = KL.argsort(1)       # most agreeing first
+            ar = torch.arange(x.size(0), device=x.device)
+            for j in range(n_pool):
+                for name, col in (("agr", asc[:, j]), ("dis", asc[:, K - 1 - j]),
+                                  ("pol", torch.full_like(asc[:, 0], j))):  # pool draws are iid: index j is random
+                    pos["%s%d" % (name, j + 1)] = (prc[ar, col, 0], prc[ar, col, 1])
+                    pool_kl.setdefault("%s%d" % (name, j + 1), []).append(KL[ar, col])
+        for m in members:  # whole image downsampled to s (global low-resolution control); position unused
+            if m.startswith("down"):
+                z = torch.zeros(x.size(0), dtype=torch.long, device=x.device)
+                pos[m] = (z, z)
         if n_gt:
             r, c = evidence_windows(cam, s, n_gt, 0.0, args.iou_thr)
             for j in range(n_gt):
@@ -394,6 +461,9 @@ def build_view_cache(teacher, trx, try_, aug, s, args):
                                         args.iou_thr)
                 pos[m] = (r[:, 0], c[:, 0])
         out.append(torch.stack([torch.stack(pos[m], 1) for m in members], 1))
+    if pool_kl:
+        print("pool KL(T(x)||T(v)) at size %d: " % s
+              + ", ".join("%s %.3f" % (m, torch.cat(v).mean().item()) for m, v in sorted(pool_kl.items())), flush=True)
     return torch.cat(out).long()
 
 
@@ -407,7 +477,37 @@ def make_cached_views(xc, idx, t_full, cache, s, args, pass_idx, rot_off=None):
     groups = []
     for j in members:
         jj = (j + rot_off[idx]) % k if (rot_off is not None and args.view_rotate) else torch.full_like(idx, j)
-        v = crop_batch(xc, cache[idx, jj, 0], cache[idx, jj, 1], s)
+        name = args.view_set[j]
+        if args.view_type == "mask":  # window kept in place at full resolution, rest = dataset mean (cached path)
+            full_s = xc.size(-1)
+            r0, c0 = cache[idx, jj, 0], cache[idx, jj, 1]
+            p = args.view_pad
+            if p > 0:  # same +-p jitter as the crops, applied to the window position
+                off = torch.randint(0, 2 * p + 1, (b, 2), device=xc.device) - p
+                r0 = (r0 + off[:, 0]).clamp(0, full_s - s)
+                c0 = (c0 + off[:, 1]).clamp(0, full_s - s)
+            v = extract_view(xc, r0, c0, s, "mask")
+            flip = torch.rand(b, device=xc.device) < 0.5
+            v = torch.where(flip.view(-1, 1, 1, 1), v.flip(-1), v)
+            with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled=args.amp):
+                tv = teacher_forward(args.teacher, v)[0].float()
+            groups.append((s, ar, v, tv, kl_teacher(t_full, tv, args.ver_tau)))
+            continue
+        if name.startswith("down"):  # whole image at the view's pixel budget
+            v = F.interpolate(xc, size=(s, s), mode="bilinear", align_corners=False, antialias=True)
+        elif args.free_random:  # grid-free random crop: offset uniform over all valid pixels, redrawn every presentation
+            hi = xc.size(-1) - s + 1
+            rc = torch.randint(0, hi, (b, 2), device=xc.device)
+            v = crop_batch(xc, rc[:, 0], rc[:, 1], s)
+            sal = cache[idx, 0]  # IoU with the teacher's top proposal (sal1) of this image and stage, logging only
+            ih = (s - (rc[:, 0] - sal[:, 0]).abs()).clamp(min=0)
+            iw = (s - (rc[:, 1] - sal[:, 1]).abs()).clamp(min=0)
+            inter = (ih * iw).float()
+            iou = inter / (2 * s * s - inter)
+            args._iou = getattr(args, "_iou", 0.0) + iou.sum().item()
+            args._iou_n = getattr(args, "_iou_n", 0) + b
+        else:
+            v = crop_batch(xc, cache[idx, jj, 0], cache[idx, jj, 1], s)
         p = args.view_pad
         if p > 0:
             vp = F.pad(v, (p, p, p, p), mode="reflect")
@@ -415,10 +515,38 @@ def make_cached_views(xc, idx, t_full, cache, s, args, pass_idx, rot_off=None):
             v = crop_batch(vp, off[:, 0], off[:, 1], s)
         flip = torch.rand(b, device=xc.device) < 0.5
         v = torch.where(flip.view(-1, 1, 1, 1), v.flip(-1), v)
+        if args.view_resize > 0:  # crop rescaled to a fixed side (RRC-style) instead of native resolution
+            v = F.interpolate(v, size=(args.view_resize, args.view_resize), mode="bilinear", align_corners=False)
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled=args.amp):
             tv = teacher_forward(args.teacher, v)[0].float()
         groups.append((s, ar, v, tv, kl_teacher(t_full, tv, args.ver_tau)))
     return groups
+
+
+def fm_augment(x, args):
+    """Function-matching augmentation (Beyer et al., 2022): inception crop (area in [fm_scale_min, 1], log-uniform
+    aspect 3/4..4/3) resampled to the input side, horizontal flip, then mixup with lambda ~ Beta(a, a). The teacher is
+    evaluated on exactly this image (consistent teaching). Returns the image, the mixup permutation and lambda."""
+    b, _, h, w = x.shape
+    dev = x.device
+    area = torch.empty(b, device=dev).uniform_(args.fm_scale_min, 1.0)
+    ratio = torch.exp(torch.empty(b, device=dev).uniform_(math.log(3 / 4), math.log(4 / 3)))
+    cw = torch.sqrt(area * ratio).clamp(max=1.0)
+    ch = torch.sqrt(area / ratio).clamp(max=1.0)
+    cx = (torch.rand(b, device=dev) * 2 - 1) * (1 - cw)
+    cy = (torch.rand(b, device=dev) * 2 - 1) * (1 - ch)
+    flip = torch.where(torch.rand(b, device=dev) < 0.5, -1.0, 1.0)
+    theta = torch.zeros(b, 2, 3, device=dev)
+    theta[:, 0, 0], theta[:, 0, 2] = cw * flip, cx
+    theta[:, 1, 1], theta[:, 1, 2] = ch, cy
+    grid = F.affine_grid(theta, (b, x.size(1), h, w), align_corners=False)
+    x = F.grid_sample(x, grid, mode="bilinear", padding_mode="reflection", align_corners=False)
+    perm, lam = torch.arange(b, device=dev), 1.0
+    if args.fm_mixup > 0:
+        lam = float(np.random.beta(args.fm_mixup, args.fm_mixup))
+        perm = torch.randperm(b, device=dev)
+        x = lam * x + (1 - lam) * x[perm]
+    return x, perm, lam
 
 
 # ----------------------------------------------------------------------------- train / eval
@@ -465,9 +593,13 @@ def main():
     ap.add_argument("--view-set", default="sal", help="sal (sampled saliency) or a list of gt1,gt2,...,conf")
     ap.add_argument("--view-rotate", type=int, default=0, help="1 = one member of --view-set per pass, in turn")
     ap.add_argument("--iou-thr", type=float, default=0.3)
-    ap.add_argument("--view-cache", type=int, default=0, help="1 = views fixed per stage from the clean image (old TGSC)")
+    ap.add_argument("--view-cache", type=int, default=0, help="1 = views fixed per stage from the clean image")
     ap.add_argument("--grid-stride", type=int, default=8, help="window grid stride for salK members")
     ap.add_argument("--view-pad", type=int, default=2, help="RandomCrop padding applied to cached views")
+    ap.add_argument("--stage-order", default="forward", choices=["forward", "reverse", "shuffled"])
+    ap.add_argument("--view-target", default="view", choices=["view", "full"],
+                    help="KD target on a view: teacher on the view, or the teacher's full-image distribution")
+    ap.add_argument("--subset-manifest", default="", help="json with 'indices' of the training images to keep")
     ap.add_argument("--rotate-mix", type=int, default=0, help="1 = per-image random rotation offset (batches mix members)")
     ap.add_argument("--stage-view-sets", default="", help="';'-separated view sets per stage (overrides --view-set)")
     ap.add_argument("--xview-w", type=float, default=0.0, help="weight of KD(T(x) || S(v)) on verified views")
@@ -483,10 +615,16 @@ def main():
     ap.add_argument("--select", default="first", choices=["first", "maxfid", "minfid", "eps"])
     ap.add_argument("--eps", type=float, default=0.5)
     ap.add_argument("--ver-tau", type=float, default=1.0)
-    ap.add_argument("--gate", default="off", choices=["off", "on"])
+    ap.add_argument("--free-random", type=int, default=0)  # 1: cached-view path, but crops at uniform random offsets (no grid, per presentation)
+    ap.add_argument("--gate", default="off", choices=["off", "on", "soft"])  # soft: omega = q_T = exp(-KL(p_T(v)||p_T(x))/sigma) at tau=T
     ap.add_argument("--sigma", type=float, default=1.0)
     ap.add_argument("--tau-g", type=float, default=0.75)
     ap.add_argument("--bn-views", type=int, default=0, help="1 = views update BN running stats")
+    ap.add_argument("--pool-k", type=int, default=16, help="candidate pool size for agrK/disK/polK members")
+    ap.add_argument("--view-resize", type=int, default=0, help=">0: cached views rescaled to this side (not native)")
+    ap.add_argument("--fm-aug", type=int, default=0, help="1 = function-matching augmentation (inception crop + mixup)")
+    ap.add_argument("--fm-scale-min", type=float, default=0.08)
+    ap.add_argument("--fm-mixup", type=float, default=1.0, help="mixup Beta(a, a); 0 = no mixup")
     args = ap.parse_args()
     args.milestones = [int(m) for m in args.milestones.split(",") if m]
     args.view_sizes = [int(s) for s in args.view_sizes.split(",")]
@@ -495,6 +633,7 @@ def main():
     args.passes = [int(p) for p in args.passes.split(",")]
     args.view_set = args.view_set.split(",")
     args.stage_view_sets = [v.split(",") for v in args.stage_view_sets.split(";") if v]
+    args.stage_plan = build_stage_plan(args)
 
     os.makedirs(args.run_dir, exist_ok=True)
     torch.manual_seed(args.seed)
@@ -505,6 +644,10 @@ def main():
     full = meta["size"]
 
     trx, try_, tex, tey = load_dataset(args.dataset, args.data_root)
+    if args.subset_manifest:  # fixed training subset (low-data / label-skew protocols)
+        keep = torch.tensor(json.load(open(args.subset_manifest))["indices"], dtype=torch.long)
+        trx, try_ = trx[keep], try_[keep]
+        print(f"subset {args.subset_manifest}: {keep.numel()} images, {torch.unique(try_).numel()} classes", flush=True)
     trx, try_, tex, tey = trx.to(dev), try_.to(dev), tex.to(dev), tey.to(dev)
     aug = GPUAugment(meta["mean"], meta["std"], full, meta["pad"], dev)
 
@@ -512,9 +655,9 @@ def main():
         teacher, t_acc = None, 0.0
         args.views = 0
     else:
+        teacher = getattr(wrn, args.teacher)(num_classes=meta["num_classes"]).to(dev)
         if args.teacher_ckpt is None:
             raise SystemExit("--teacher-ckpt is required unless --teacher none")
-        teacher = getattr(wrn, args.teacher)(num_classes=meta["num_classes"]).to(dev)
         ck = torch.load(args.teacher_ckpt, map_location="cpu", weights_only=False)
         teacher.load_state_dict(ck["model"] if "model" in ck else ck)
         teacher.eval()
@@ -564,6 +707,7 @@ def main():
             if view_cache is None or view_cache[2] != (s_now, tuple(args.view_set)):
                 view_cache = (s_now, build_view_cache(teacher, trx, try_, aug, s_now, args), (s_now, tuple(args.view_set)))
                 print(f"view cache: size {s_now}, members {args.view_set}", flush=True)
+        args._iou, args._iou_n = 0.0, 0
         stats = dict(loss=0.0, full=0.0, view=0.0, D=0.0, q=0.0, nview=0.0, size=0.0, correct=0, xok=0.0)
         rot_off = torch.randint(0, len(args.view_set), (n,), device=dev) if args.rotate_mix else None
         for it in range(steps_per_epoch * n_pass):
@@ -571,7 +715,10 @@ def main():
                 perm = torch.randperm(n, device=dev)
             j = it % steps_per_epoch
             idx = perm[j * args.bs:(j + 1) * args.bs]
-            x = aug(trx[idx])
+            if args.fm_aug:
+                x, fm_perm, fm_lam = fm_augment(aug.normalize(trx[idx]), args)
+            else:
+                x, fm_lam = aug(trx[idx]), 1.0
             y = try_[idx]
             if teacher is not None:
                 with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled=bool(args.amp)):
@@ -584,8 +731,10 @@ def main():
                 if teacher is None:
                     l_full = F.cross_entropy(s_full.float(), y)
                 else:
-                    l_full = args.ce_w * F.cross_entropy(s_full.float(), y) \
-                        + args.kd_w * kd_per_sample(s_full, t_full, args.T).mean()
+                    ce = F.cross_entropy(s_full.float(), y)
+                    if fm_lam < 1.0:  # mixup: labels mixed with the same lambda as the images
+                        ce = fm_lam * ce + (1 - fm_lam) * F.cross_entropy(s_full.float(), y[fm_perm])
+                    l_full = args.ce_w * ce + args.kd_w * kd_per_sample(s_full, t_full, args.T).mean()
                 loss = (args.anchor if active else 1.0) * l_full
                 stats["full"] += l_full.item()
                 stats["correct"] += (s_full.argmax(1) == y).sum().item()
@@ -608,11 +757,16 @@ def main():
                             torch.autocast("cuda", dtype=torch.float16, enabled=bool(args.amp)):
                         sv = student_logits(student, v)
                     q = torch.exp(-D / args.sigma)
-                    w = (q / args.tau_g).clamp(max=1.0) if args.gate == "on" else torch.ones_like(q)
+                    if args.gate == "soft":  # agreement weight omega = q_T(v, x), no threshold (paper Sec. 3.2 direction)
+                        w = torch.exp(-kl_teacher(tv, t_full[gi], args.T) / args.sigma)
+                        stats["w"] = stats.get("w", 0.0) + w.sum().item()
+                    else:
+                        w = (q / args.tau_g).clamp(max=1.0) if args.gate == "on" else torch.ones_like(q)
                     ce_v = F.cross_entropy(sv.float(), y[gi], reduction="none")
                     if args.view_ce_mode == "valid":  # y_v: the image label is a valid target only if the view keeps it
                         ce_v = ce_v * (tv.argmax(1) == y[gi]).float()
-                    per = args.view_ce * ce_v + args.kd_w * w * kd_per_sample(sv, tv, args.T)
+                    tgt = t_full[gi] if args.view_target == "full" else tv
+                    per = args.view_ce * ce_v + args.kd_w * w * kd_per_sample(sv, tgt, args.T)
                     if args.xview_w > 0:  # local-to-global: verified views (D <= eps) also match T(x), Lemma 1
                         ok = (D <= args.xview_eps).float()
                         per = per + args.xview_w * args.kd_w * ok * kd_per_sample(sv, t_full[gi], args.T)
@@ -642,7 +796,7 @@ def main():
                    loss=stats["loss"] / ns, l_full=stats["full"] / ns,
                    l_view=stats["view"] / ns,
                    train_acc=100.0 * stats["correct"] / (ns * args.bs),
-                   view_D=stats["D"] / nv, view_q=stats["q"] / nv, xview_frac=stats["xok"] / nv,
+                   view_D=stats["D"] / nv, view_q=stats["q"] / nv, view_w=stats.get("w", nv) / nv, rand_iou_sal1=(getattr(args, "_iou", 0.0) / max(1, getattr(args, "_iou_n", 0))), xview_frac=stats["xok"] / nv,
                    view_frac=stats["nview"] / (ns * args.bs), view_size=stats["size"] / nv,
                    sec=time.time() - t0)
         log.write(json.dumps(rec) + "\n")
