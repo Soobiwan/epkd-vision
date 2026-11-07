@@ -82,6 +82,51 @@ as well as standard KD.
 * `--view-type mask`: keep the window in place and set the rest to the mean (instead of cropping).
 * `--amp 0`: fp32 instead of mixed precision.
 
+## Vision Transformers (CIFAR-100 at 224 px)
+
+`train_vit.py` applies the same method to a ViT student. Only the view family and the teacher relevance change:
+
+* **Pair.** ViT-S/16 teacher → DeiT-T/16 student trained from scratch.
+  * The teacher is the OFA-KD CIFAR-100 checkpoint ([Hao et al., NeurIPS 2023](https://github.com/Hao840/OFAKD)).
+    It scores 92.22% under the eval transform below.
+  * Teacher and student both see 14 × 14 = 196 patch tokens.
+* **View.** A square window of *s* × *s* patch tokens.
+  * The tokens keep their original position embeddings, and the CLS token is kept.
+  * The other tokens are dropped. They are not masked, and nothing is resized.
+  * Window sides per stage: 7, 9, 10, 12, then the full image (25, 41, 51, 73, 100% of the tokens).
+* **Relevance.** The teacher's last-layer CLS→patch attention, averaged over heads.
+  * It is computed on the full augmented image during the anchor forward, so the proposals are online and need no cache.
+  * The 3 windows with the most attention mass are the proposals. Selection is greedy and suppresses IoU > 0.3.
+  * Pass *p* uses the (*p* mod 3)-th proposal.
+* **Targets.** Each view gets the teacher's response on the same token window (own-view target). The full-image
+  objective stays at every step.
+* **Budget.** 5 stages of 60 epochs over 300 epochs, with passes 3,3,3,1,1. That is 2.2× the optimizer steps of
+  standard KD, so always also report KD with the same steps (`--views 0 --passes 3,3,3,1,1`).
+
+Training recipe: OFA-KD `configs/cifar/vit_mlp.yaml`, reproduced on one GPU.
+* **Batch and optimizer.**
+  * OFA used 8 GPUs × 128. Here the global batch of 1024 comes from 8 × 128 gradient accumulation (`--accum 8`).
+  * AdamW, lr 5e-4, weight decay 0.05.
+  * Cosine schedule to 1e-5, stepped per epoch, after 20 warmup epochs from 5e-7. Gradient clipping at 5.
+* **Augmentation.** RandomResizedCrop 224 (0.08–1) from the 32-px image, horizontal flip, RandAugment
+  `rand-m9-mstd0.5-inc1`, random erasing 0.25, mixup 0.8 / cutmix 1.0, label smoothing 0.1.
+  * Views are cut from the same augmented, mixed image as the anchor.
+* **Loss.** OFA's KD, applied to the full image and to every view: soft-target CE (weight 1) + KL at τ = 1 (weight 1).
+* **Evaluation.** Bicubic resize to 256, center crop 224 (the timm eval transform). The resized test set is cached as
+  uint8 on first use (`--test-cache`).
+* **Pillow compatibility.** Pillow ≥ 11 rejects posterize with 0 bits, which `inc1` reaches at magnitude 10.
+  `train_vit.py` restores the old-Pillow behaviour (a black image) that OFA ran with.
+
+```bash
+scripts/get_vit_teacher.sh     # download + weights-only conversion -> teachers/vit_small_patch16_224_cifar100_weights.pt
+scripts/cifar100_vit.sh 0      # EP-KD, KD, KD with the same optimizer-step budget (seed 0)
+```
+
+On an RTX 2080 Ti, KD takes ~4.6 h, KD with the same steps ~9.8 h and EP-KD ~14 h. Peak memory is ~3.2 GB, and data
+loading uses 6 workers.
+The outputs are the same files as `train.py`. `train.jsonl` also records `side`, `view_D` (KL(p_T(x) ‖ p_T(v))),
+`img_s` and `data_wait`.
+
 ## Results so far (WRN-40-2 → WRN-40-1, best test epoch)
 
 Preliminary numbers from development. They are not final paper numbers.
@@ -107,6 +152,8 @@ Ablations, CIFAR-100, seed 0:
 ## Files
 
 * `train.py`: training script (EP-KD, KD baselines, teacher training, ablations).
+* `train_vit.py`: EP-KD and KD baselines for ViT students (token-window views, CLS-attention proposals).
 * `wrn.py`: Wide-ResNet (CRD / RepDistiller definition).
 * `prepare_data.py`: converts the STL-10 and Tiny-ImageNet parquet files to uint8 tensors.
-* `scripts/`: data download, teacher training, and per-dataset run scripts.
+* `scripts/`: data download, teacher training, per-dataset run scripts, and the ViT teacher download
+  (`get_vit_teacher.sh`, `convert_ofa_checkpoint.py`) and runs (`cifar100_vit.sh`).

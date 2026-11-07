@@ -2,3 +2,6 @@ torch>=2.1
 numpy
 pyarrow
 pillow
+# ViT setup (train_vit.py) only; tested with timm 1.0.30, torch 2.6.0, torchvision 0.21
+torchvision
+timm>=1.0,<1.1
