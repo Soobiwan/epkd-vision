@@ -23,6 +23,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wrn  # noqa: E402
+from models import build_model, classifier  # noqa: E402
 
 DATASETS = {
     "cifar100": dict(num_classes=100, size=32, pad=4,
@@ -98,14 +99,35 @@ def extract_view(x, r, c, s, view_type):
 
 # ----------------------------------------------------------------------------- models
 def teacher_forward(t, x):
-    """Lean WRN forward (eval mode): logits and the pre-pool feature map used for CAM."""
-    out = t.block3(t.block2(t.block1(t.conv1(x))))
-    f = t.relu(t.bn1(out))
-    return t.fc(f.mean((2, 3))), f
+    """Teacher forward (eval mode): logits and the pre-pool feature map used for CAM."""
+    if isinstance(t, wrn.WideResNet):  # lean WRN path (the paper runs)
+        out = t.block3(t.block2(t.block1(t.conv1(x))))
+        f = t.relu(t.bn1(out))
+        return t.fc(f.mean((2, 3))), f
+    logits, feats = t(x)  # CRD zoo: feats["feats"][-1] is the map that is average-pooled into the classifier
+    return logits, feats["feats"][-1]
 
 
 def student_logits(s, x):
     return s(x)[0]
+
+
+def load_checkpoint(path):
+    """weights_only torch.load that also accepts the RepDistiller / CRD teacher checkpoints, which store the
+    training options (argparse.Namespace) and the accuracy as a numpy scalar next to the state dict."""
+    try:
+        from numpy.core.multiarray import scalar
+    except ImportError:
+        from numpy._core.multiarray import scalar
+    plain = [argparse.Namespace, np.dtype, scalar] + [type(np.dtype(t)) for t in ("float64", "float32", "int64")]
+    named = plain + [(scalar, "numpy.core.multiarray.scalar"), (scalar, "numpy._core.multiarray.scalar")]
+    for allowed in (named, plain):  # (obj, name) pairs need torch >= 2.6
+        try:
+            torch.serialization.add_safe_globals(allowed)
+            return torch.load(path, map_location="cpu", weights_only=True)
+        except (TypeError, AttributeError):
+            continue
+    return torch.load(path, map_location="cpu", weights_only=True)
 
 
 class NoBNUpdate:
@@ -397,7 +419,7 @@ def build_view_cache(teacher, trx, try_, aug, s, args):
         with torch.autocast("cuda", dtype=torch.float16, enabled=args.amp):
             t, f = teacher_forward(teacher, x)
         full = x.size(-1)
-        cam = cam_map(f, teacher.fc.weight, y, full)
+        cam = cam_map(f, classifier(teacher).weight, y, full)
         pos = {}
         if n_sal:
             g = args.grid_stride
@@ -457,7 +479,7 @@ def build_view_cache(teacher, trx, try_, aug, s, args):
         if confs:
             ranked = t.float().scatter(1, y.view(-1, 1), float("-inf")).topk(max(int(m[4:] or 1) for m in confs), 1).indices
             for m in confs:
-                r, c = evidence_windows(cam_map(f, teacher.fc.weight, ranked[:, int(m[4:] or 1) - 1], full), s, 1, 0.0,
+                r, c = evidence_windows(cam_map(f, classifier(teacher).weight, ranked[:, int(m[4:] or 1) - 1], full), s, 1, 0.0,
                                         args.iou_thr)
                 pos[m] = (r[:, 0], c[:, 0])
         out.append(torch.stack([torch.stack(pos[m], 1) for m in members], 1))
@@ -565,8 +587,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", default="cifar100")
     ap.add_argument("--data-root", default="./data", help="folder with cifar-100-python/ or <dataset>_uint8.pt")
-    ap.add_argument("--teacher", default="wrn_40_2")
-    ap.add_argument("--student", default="wrn_40_1")
+    ap.add_argument("--teacher", default="wrn_40_2", help="model name (models.MODELS) or none")
+    ap.add_argument("--student", default="wrn_40_1", help="model name (models.MODELS)")
     ap.add_argument("--teacher-ckpt", default=None, help="teacher state dict (or a dict with key 'model')")
     ap.add_argument("--run-dir", required=True)
     ap.add_argument("--seed", type=int, default=0)
@@ -655,10 +677,10 @@ def main():
         teacher, t_acc = None, 0.0
         args.views = 0
     else:
-        teacher = getattr(wrn, args.teacher)(num_classes=meta["num_classes"]).to(dev)
+        teacher = build_model(args.teacher, meta["num_classes"]).to(dev)
         if args.teacher_ckpt is None:
             raise SystemExit("--teacher-ckpt is required unless --teacher none")
-        ck = torch.load(args.teacher_ckpt, map_location="cpu", weights_only=False)
+        ck = load_checkpoint(args.teacher_ckpt)
         teacher.load_state_dict(ck["model"] if "model" in ck else ck)
         teacher.eval()
         for p in teacher.parameters():
@@ -667,7 +689,7 @@ def main():
         teacher.eval()
     args.teacher = teacher
 
-    student = getattr(wrn, args.student)(num_classes=meta["num_classes"]).to(dev)
+    student = build_model(args.student, meta["num_classes"]).to(dev)
     opt = torch.optim.SGD(student.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.wd)
     scaler = torch.amp.GradScaler("cuda", enabled=bool(args.amp))
 
@@ -739,12 +761,12 @@ def main():
                 stats["full"] += l_full.item()
                 stats["correct"] += (s_full.argmax(1) == y).sum().item()
             if active:
-                cams = {"gt": cam_map(feat, teacher.fc.weight, y, full)}
+                cams = {"gt": cam_map(feat, classifier(teacher).weight, y, full)}
                 confs = [m for m in args.view_set if m.startswith("conf")]
                 if confs:  # evidence behind the teacher's k-th ranked non-label class (conf = conf1 = runner-up)
                     ranked = t_full.scatter(1, y.view(-1, 1), float("-inf")).topk(max(int(m[4:] or 1) for m in confs), 1).indices
                     for m in confs:
-                        cams[m] = cam_map(feat, teacher.fc.weight, ranked[:, int(m[4:] or 1) - 1], full)
+                        cams[m] = cam_map(feat, classifier(teacher).weight, ranked[:, int(m[4:] or 1) - 1], full)
                 if args.view_cache:
                     groups = make_cached_views(aug.normalize(trx[idx]), idx, t_full, view_cache[1], view_cache[0], args,
                                                it // steps_per_epoch, rot_off)
