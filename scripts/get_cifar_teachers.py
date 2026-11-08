@@ -31,7 +31,7 @@ TEACHERS = {
     "resnet32x4": ("22aa12e2b632b19ddde155ccf2388671842ddd304824b3095e0a7fff364beb4f", 79.42),
     "vgg13": ("ff25893af9e28fe12cfcc4fd0c699596754eb89bfafd521dfb1301cd281b47f8", 74.64),
     "wrn_40_2": ("41100a8e8478b326645eb9aab09c18fc8ed34c1ab4004d658cb652125a81ca18", 75.61),
-    "ResNet50": (None, 79.34),
+    "ResNet50": ("9f546083e2e4e5aaa733b328f34c354acb93b168952684f7742f556ba1253c3d", 79.34),
 }
 
 

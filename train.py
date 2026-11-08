@@ -24,6 +24,7 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wrn  # noqa: E402
 from models import build_model, classifier  # noqa: E402
+import mvkd  # noqa: E402  (CRLD / VRM objectives and their GPU RandAugment)
 
 DATASETS = {
     "cifar100": dict(num_classes=100, size=32, pad=4,
@@ -62,6 +63,14 @@ class GPUAugment:
 
     def normalize(self, xb_uint8):
         return (xb_uint8.float().div_(255.0) - self.mean) / self.std
+
+    def normalize_float(self, x255):
+        """uint8-valued float images in [0, 255] -> normalised (as ToTensor + Normalize)."""
+        return (x255 / 255.0 - self.mean) / self.std
+
+    def denormalize(self, x):
+        """normalised -> uint8-valued floats in [0, 255] (views are crops of normalised images)."""
+        return (x * self.std + self.mean).mul(255.0).round().clamp(0, 255)
 
     def __call__(self, xb_uint8):
         x = self.normalize(xb_uint8)
@@ -648,6 +657,9 @@ def main():
     ap.add_argument("--bn-views", type=int, default=0, help="1 = views update BN running stats")
     ap.add_argument("--pool-k", type=int, default=16, help="candidate pool size for agrK/disK/polK members")
     ap.add_argument("--view-resize", type=int, default=0, help=">0: cached views rescaled to this side (not native)")
+    ap.add_argument("--method", default="kd", choices=["kd", "crld", "vrm"],
+                    help="distillation objective for the full image and the views: kd (paper), or the two-view CRLD (MM'24) /"
+                         " VRM (ICCV'25) objectives, each on a weak and a RandAugment-strong copy (mvkd.py)")
     ap.add_argument("--fm-aug", type=int, default=0, help="1 = function-matching augmentation (inception crop + mixup)")
     ap.add_argument("--fm-scale-min", type=float, default=0.08)
     ap.add_argument("--fm-mixup", type=float, default=1.0, help="mixup Beta(a, a); 0 = no mixup")
@@ -741,7 +753,13 @@ def main():
                 perm = torch.randperm(n, device=dev)
             j = it % steps_per_epoch
             idx = perm[j * args.bs:(j + 1) * args.bs]
-            if args.fm_aug:
+            two_view = args.method != "kd"
+            if two_view:  # CRLD / VRM data pipeline: weak = zero-pad crop + flip; strong = independent crop + flip + RandAugment
+                raw = trx[idx].float()
+                x = aug.normalize_float(mvkd.weak_crop_flip(raw))
+                x_s = aug.normalize_float(mvkd.randaugment(mvkd.weak_crop_flip(raw)))
+                fm_lam = 1.0
+            elif args.fm_aug:
                 x, fm_perm, fm_lam = fm_augment(aug.normalize(trx[idx]), args)
             else:
                 x, fm_lam = aug(trx[idx]), 1.0
@@ -749,9 +767,19 @@ def main():
             if teacher is not None:
                 with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled=bool(args.amp)):
                     t_full, feat = teacher_forward(teacher, x)
+                    if two_view:
+                        t_full_s = teacher_forward(teacher, x_s)[0].float()
                 t_full = t_full.float()
             loss = 0.0
-            if use_full:
+            if use_full and two_view:
+                with torch.autocast("cuda", dtype=torch.float16, enabled=bool(args.amp)):
+                    s_full = student_logits(student, x)
+                    s_full_s = student_logits(student, x_s)
+                l_full = mvkd.LOSSES[args.method](s_full, s_full_s, t_full, t_full_s, y)
+                loss = (args.anchor if active else 1.0) * l_full
+                stats["full"] += l_full.item()
+                stats["correct"] += (s_full.argmax(1) == y).sum().item()
+            elif use_full:
                 with torch.autocast("cuda", dtype=torch.float16, enabled=bool(args.amp)):
                     s_full = student_logits(student, x)
                 if teacher is None:
@@ -778,6 +806,19 @@ def main():
                     groups = make_views(x, y, t_full, cams, epoch, args, full, pass_idx=it // steps_per_epoch)
                 l_view = 0.0
                 for s, gi, v, tv, D in groups:
+                    if two_view:  # the method's objective on the view and on a RandAugment-strong copy of it
+                        v_s = aug.normalize_float(mvkd.randaugment(aug.denormalize(v)))
+                        with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled=bool(args.amp)):
+                            tv_s = teacher_forward(teacher, v_s)[0].float()
+                        with NoBNUpdate(student, enabled=use_full and not args.bn_views), \
+                                torch.autocast("cuda", dtype=torch.float16, enabled=bool(args.amp)):
+                            sv = student_logits(student, v)
+                            sv_s = student_logits(student, v_s)
+                        l_view = l_view + mvkd.LOSSES[args.method](sv, sv_s, tv, tv_s, y[gi]) * gi.numel() / x.size(0)  # view_w applied below
+                        stats["D"] += D.sum().item()
+                        stats["nview"] += gi.numel()
+                        stats["size"] += float(s * gi.numel()) if isinstance(s, int) else float(s.float().sum())
+                        continue
                     # views leave BN running stats alone when the full image is also trained on this step
                     with NoBNUpdate(student, enabled=use_full and not args.bn_views), \
                             torch.autocast("cuda", dtype=torch.float16, enabled=bool(args.amp)):

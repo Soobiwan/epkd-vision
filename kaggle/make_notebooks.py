@@ -1,6 +1,12 @@
-"""Generates one Kaggle notebook per CIFAR-100 teacher -> student pair (EP-KD, 3 seeds, Kaggle GPU T4 x2).
+"""Generates the Kaggle notebooks for the CIFAR-100 table (3 seeds each, Kaggle GPU T4 x2): for each of the nine
+teacher -> student pairs of the VRM table (Zhang et al., ICCV 2025), one notebook per method:
+  epkd       EP-KD with the KD objective             -> kaggle/epkd_cifar100_<teacher>_to_<student>.ipynb
+  crld_epkd  EP-KD with the CRLD objective (MM'24)   -> kaggle/crld_epkd_cifar100_<teacher>_to_<student>.ipynb
+  vrm_epkd   EP-KD with the VRM objective (ICCV'25)  -> kaggle/vrm_epkd_cifar100_<teacher>_to_<student>.ipynb
+CRLD and VRM run with their published batch size (64) and two views (weak + RandAugment, mvkd.py); the published
+CRLD / VRM accuracies without EP-KD are the paper's baselines.
 
-Usage: python kaggle/make_notebooks.py   (writes kaggle/epkd_cifar100_<teacher>_to_<student>.ipynb)
+Usage: python kaggle/make_notebooks.py
 """
 import json
 import os
@@ -8,35 +14,40 @@ import os
 # (teacher, student, test accuracy of the RepDistiller teacher file, base learning rate)
 # The ResNet56 file scores 72.41 (DKD's tables list 72.34).
 # lr 0.01 for the MobileNetV2 / ShuffleNet students and 0.05 otherwise, as in CRD and DKD.
-PAIRS = [
+PAIRS = [  # the nine pairs of the VRM table (Zhang et al., ICCV 2025, Tab. 1)
     ("resnet56", "resnet20", 72.41, 0.05),
-    ("resnet110", "resnet32", 74.31, 0.05),
     ("resnet32x4", "resnet8x4", 79.42, 0.05),
     ("wrn_40_2", "wrn_16_2", 75.61, 0.05),
     ("wrn_40_2", "wrn_40_1", 75.61, 0.05),
     ("vgg13", "vgg8", 74.64, 0.05),
-    ("resnet32x4", "ShuffleV1", 79.42, 0.01),
-    ("wrn_40_2", "ShuffleV1", 75.61, 0.01),
-    ("vgg13", "MobileNetV2", 74.64, 0.01),
     ("resnet32x4", "ShuffleV2", 79.42, 0.01),
+    ("vgg13", "MobileNetV2", 74.64, 0.01),
+    ("ResNet50", "MobileNetV2", 79.34, 0.01),
+    ("wrn_40_2", "ShuffleV1", 75.61, 0.01),
 ]
+EP = ["--views", "1", "--view-cache", "1", "--view-set", "sal1,sal2,sal3", "--view-rotate", "1",
+      "--passes", "3,3,3,1,1", "--anchor", "1", "--milestones", "48,144,192,210"]
+METHOD_ARGS = {"epkd": EP,
+               "crld_epkd": EP + ["--method", "crld", "--bs", "64"],
+               "vrm_epkd": EP + ["--method", "vrm", "--bs", "64"]}
+METHOD_TITLE = {"epkd": "EP-KD (KD objective)", "crld_epkd": "CRLD + EP-KD", "vrm_epkd": "VRM + EP-KD"}
 PRETTY = {"resnet56": "ResNet56", "resnet20": "ResNet20", "resnet110": "ResNet110", "resnet32": "ResNet32",
           "resnet32x4": "ResNet32x4", "resnet8x4": "ResNet8x4", "wrn_40_2": "WRN-40-2", "wrn_16_2": "WRN-16-2",
           "wrn_40_1": "WRN-40-1", "vgg13": "VGG13", "vgg8": "VGG8", "ShuffleV1": "ShuffleNetV1",
-          "ShuffleV2": "ShuffleNetV2", "MobileNetV2": "MobileNetV2"}
+          "ShuffleV2": "ShuffleNetV2", "MobileNetV2": "MobileNetV2", "ResNet50": "ResNet50"}
 
-INTRO = """# EP-KD on CIFAR-100: {tp} → {sp} (3 seeds, Kaggle GPU T4 x2)
+INTRO = """# {mtitle} on CIFAR-100: {tp} → {sp} (3 seeds, Kaggle GPU T4 x2)
 
 This notebook clones [Soobiwan/epkd-vision](https://github.com/Soobiwan/epkd-vision). It downloads CIFAR-100 and the
-pretrained {tp} teacher, then trains the {sp} student with **EP-KD for vision**, using the paper recipe
-(`scripts/cifar100.sh`), for seeds 0, 1 and 2.
+pretrained {tp} teacher, then trains the {sp} student with **{mtitle}**, using the paper's EP-KD recipe
+(`scripts/cifar100.sh`){mnote}, for seeds 0, 1 and 2.
 
 | | |
 |---|---|
 | teacher | `{t}`. The standard CRD teacher from [RepDistiller](https://github.com/HobbitLong/RepDistiller), test accuracy {tacc:.2f}%. If that server fails, the notebook uses the mirror in the [mdistiller](https://github.com/megvii-research/mdistiller) release. |
 | student | `{s}`, base learning rate {lr} (the CRD / DKD setting for this student) |
-| EP-KD | `--views 1 --view-cache 1 --view-set sal1,sal2,sal3 --view-rotate 1 --passes 3,3,3,1,1 --anchor 1 --milestones 48,144,192,210` |
-| KD (ours) | `--views 0 --milestones 150,180,210`, the same seeds. Off by default (`RUN_KD = False`); set it to `True` for the "KD (ours)" row of the paper table. |
+| method | `{margs}` |
+| KD (ours) | `--views 0 --milestones 150,180,210`, the same seeds (EP-KD notebook only). Off by default (`RUN_KD = False`); set it to `True` for the "KD (ours)" row of the paper table. |
 | reported | the **best test epoch** of each run, as mean ± sd over seeds, and the EP-KD − KD difference paired by seed |
 
 **Kaggle settings (right panel):** Accelerator **GPU T4 x2**, Internet **on**. Then use **Save Version → Save & Run All
@@ -55,11 +66,12 @@ The jobs run concurrently: `JOBS_PER_GPU` jobs on each GPU. The EP-KD jobs start
 jobs fill the free slots."""
 
 CONFIG = """# ---- configuration ----
+METHOD = "{method}"       # epkd, crld_epkd or vrm_epkd (one method per notebook)
 TEACHER, STUDENT = "{t}", "{s}"
 TEACHER_ACC = {tacc}      # test accuracy of the teacher checkpoint (sanity check only)
 LR = {lr}                 # base learning rate (CRD / DKD setting for this student)
 SEEDS = [0, 1, 2]
-RUN_KD = False            # True: also train KD (ours) with the standard schedule, same seeds (paper table row + Delta)
+RUN_KD = False            # EP-KD notebook only: also train KD (ours), standard schedule, same seeds (table row + Delta)
 JOBS_PER_GPU = 2          # concurrent training processes per GPU (data and augmentation live on the GPU)
 REPO = "https://github.com/Soobiwan/epkd-vision.git"
 REPO_REF = "main"         # branch, tag or commit of epkd-vision
@@ -140,10 +152,9 @@ for prev in glob.glob(f"/kaggle/input/**/runs/{PAIR}_*", recursive=True):
 RUN = """# Job runner: EP-KD (and KD) for every seed, JOBS_PER_GPU concurrent jobs per GPU
 COMMON = ["--teacher", TEACHER, "--student", STUDENT, "--teacher-ckpt", TEACHER_CKPT,
           "--data-root", data, "--lr", str(LR)]
-METHODS = {"epkd": ["--views", "1", "--view-cache", "1", "--view-set", "sal1,sal2,sal3", "--view-rotate", "1",
-                    "--passes", "3,3,3,1,1", "--anchor", "1", "--milestones", "48,144,192,210"],
-           "kd": ["--views", "0", "--milestones", "150,180,210"]}
-jobs = [(m, s) for m in (["epkd", "kd"] if RUN_KD else ["epkd"]) for s in SEEDS]  # EP-KD first
+METHODS = {METHOD: {margs_py}, "kd": ["--views", "0", "--milestones", "150,180,210"]}
+RUN_METHODS = [METHOD] + (["kd"] if RUN_KD and METHOD == "epkd" else [])
+jobs = [(m, s) for m in RUN_METHODS for s in SEEDS]  # the method first
 pending = [j for j in jobs if not progress(os.path.join(OUT, f"{PAIR}_{j[0]}_s{j[1]}"))[0]]
 print(f"{len(jobs) - len(pending)} done, {len(pending)} to run: {pending}")
 
@@ -202,7 +213,7 @@ def best_of(run_dir):
     return best
 
 res, teacher_acc = {}, None
-for m in (METHODS if RUN_KD else ["epkd"]):
+for m in RUN_METHODS:
     for s in SEEDS:
         rd = os.path.join(OUT, f"{PAIR}_{m}_s{s}")
         if os.path.isdir(rd):
@@ -216,7 +227,7 @@ print(f"{PAIR}: teacher accuracy measured {teacher_acc} (expected {TEACHER_ACC})
 lines = [f"## {PAIR} (epkd-vision @ {COMMIT[:7]})", "", "| method | " + " | ".join(f"s{s}" for s in SEEDS) + " | mean ± sd |",
          "|---|" + "---|" * (len(SEEDS) + 1)]
 summary = dict(pair=PAIR, teacher=TEACHER, student=STUDENT, lr=LR, commit=COMMIT, teacher_acc=teacher_acc, runs={})
-for m in (METHODS if RUN_KD else ["epkd"]):
+for m in RUN_METHODS:
     cells, vals = [], []
     for s in SEEDS:
         r = res.get((m, s))
@@ -231,21 +242,20 @@ for m in (METHODS if RUN_KD else ["epkd"]):
     summary[m] = dict(mean=float(np.mean(vals)) if vals else None,
                       sd=float(np.std(vals, ddof=1)) if len(vals) > 1 else None, n=len(vals))
     lines.append(f"| {m} | " + " | ".join(cells) + f" | {ms} |")
-paired = [res[("epkd", s)]["best"] - res[("kd", s)]["best"] for s in SEEDS
-          if res.get(("epkd", s), {}).get("done") and res.get(("kd", s), {}).get("done")]
+paired = [res[(METHOD, s)]["best"] - res[("kd", s)]["best"] for s in SEEDS
+          if res.get((METHOD, s), {}).get("done") and res.get(("kd", s), {}).get("done")]
 if len(paired) > 1:
     d, sd = float(np.mean(paired)), float(np.std(paired, ddof=1))
     h = T95[len(paired) - 1] * sd / np.sqrt(len(paired))
     summary["delta"] = dict(mean=d, ci95=[d - h, d + h], n=len(paired))
     lines += ["", f"EP-KD − KD (paired, n={len(paired)}): {d:+.2f} [{d - h:+.2f}, {d + h:+.2f}]"]
-unfinished = [f"{m}_s{s}" for m in METHODS for s in SEEDS
-              if (m == "epkd" or RUN_KD) and not res.get((m, s), {}).get("done")]
+unfinished = [f"{m}_s{s}" for m in RUN_METHODS for s in SEEDS if not res.get((m, s), {}).get("done")]
 if unfinished:
     lines += ["", f"UNFINISHED: {unfinished}. Attach this version's output and run again (see the top cell)."]
 text = "\\n".join(lines)
 print(text)
-open(f"/kaggle/working/summary_{PAIR}.md", "w").write(text + "\\n")
-json.dump(summary, open(f"/kaggle/working/summary_{PAIR}.json", "w"), indent=1)"""
+open(f"/kaggle/working/summary_{METHOD}_{PAIR}.md", "w").write(text + "\\n")
+json.dump(summary, open(f"/kaggle/working/summary_{METHOD}_{PAIR}.json", "w"), indent=1)"""
 
 
 def cell(kind, src):
@@ -255,10 +265,13 @@ def cell(kind, src):
     return c
 
 
-def notebook(t, s, tacc, lr):
-    fmt = dict(t=t, s=s, tp=PRETTY[t], sp=PRETTY[s], tacc=tacc, lr=lr)
+def notebook(t, s, tacc, lr, method):
+    note = "" if method == "epkd" else (" with the " + method.split("_")[0].upper() + " objective of mvkd.py in place of KD "
+                                        "(weak + RandAugment-strong copy of every image and view, batch 64)")
+    fmt = dict(t=t, s=s, tp=PRETTY[t], sp=PRETTY[s], tacc=tacc, lr=lr, method=method, mtitle=METHOD_TITLE[method],
+               mnote=note, margs=" ".join(METHOD_ARGS[method]), margs_py=repr(METHOD_ARGS[method]))
     cells = [cell("markdown", INTRO.format(**fmt)), cell("code", CONFIG.format(**fmt)), cell("code", SETUP),
-             cell("code", DATA), cell("code", TEACHER_CELL), cell("code", RESTORE), cell("code", RUN),
+             cell("code", DATA), cell("code", TEACHER_CELL), cell("code", RESTORE), cell("code", RUN.replace("{margs_py}", fmt["margs_py"])),
              cell("code", SUMMARY)]
     return {"cells": cells, "nbformat": 4, "nbformat_minor": 4,
             "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
@@ -270,8 +283,9 @@ def notebook(t, s, tacc, lr):
 
 if __name__ == "__main__":
     here = os.path.dirname(os.path.abspath(__file__))
-    for t, s, tacc, lr in PAIRS:
-        path = os.path.join(here, f"epkd_cifar100_{t}_to_{s}.ipynb")
-        with open(path, "w") as f:
-            json.dump(notebook(t, s, tacc, lr), f, indent=1)
-        print(path)
+    for method in METHOD_ARGS:
+        for t, s, tacc, lr in PAIRS:
+            path = os.path.join(here, f"{method}_cifar100_{t}_to_{s}.ipynb")
+            with open(path, "w") as f:
+                json.dump(notebook(t, s, tacc, lr, method), f, indent=1)
+            print(path)

@@ -11,6 +11,7 @@ from .vgg import vgg8_bn, vgg13_bn
 from .mobilenetv2 import mobile_half
 from .ShuffleNetv1 import ShuffleV1
 from .ShuffleNetv2 import ShuffleV2
+from .resnetv2 import ResNet50  # RepDistiller / mdistiller resnetv2.py (already adaptive-pooled)
 
 # names follow the CRD / mdistiller teacher folders (<name>_vanilla/ckpt_epoch_240.pth)
 MODELS = {
@@ -20,6 +21,7 @@ MODELS = {
     "vgg8": vgg8_bn, "vgg13": vgg13_bn,
     "MobileNetV2": lambda num_classes: mobile_half(num_classes),
     "ShuffleV1": ShuffleV1, "ShuffleV2": ShuffleV2,
+    "ResNet50": ResNet50,
 }
 
 
