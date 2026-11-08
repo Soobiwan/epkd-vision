@@ -122,6 +122,7 @@ as well as standard KD.
 | least-salient windows | `--view-set low1,low2,low3` |
 | from 16 random windows per image (`--pool-k 16`), the most / least agreeing with p_T(·\|x), or 3 at random | `--view-set agr1,agr2,agr3` / `dis1,dis2,dis3` / `pol1,pol2,pol3` |
 | crop resized to the input size / masked window / whole image resized to the view size | `--view-resize 32` / `--view-type mask` / `--view-set down1,down2,down3` |
+| view supervision: hard labels only / full-image target, verified as in the language regime (ω = q_T, discard q_T < κ) | `--view-ce 1 --view-kd-w 0` / `--view-target full --gate soft --sigma 1 --gate-kappa 0.8` |
 | KD: EP-KD's schedule with 1 pass, more steps than EP-KD, function matching (Beyer et al., 2022) | `--views 0 --milestones 48,144,192,210` / `--passes 4,4,4,2,2` / `--fm-aug 1` |
 
 Data options:

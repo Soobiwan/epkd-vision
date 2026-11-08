@@ -640,6 +640,10 @@ def main():
     ap.add_argument("--free-random", type=int, default=0)  # 1: cached-view path, but crops at uniform random offsets (no grid, per presentation)
     ap.add_argument("--gate", default="off", choices=["off", "on", "soft"])  # soft: omega = q_T = exp(-KL(p_T(v)||p_T(x))/sigma) at tau=T
     ap.add_argument("--sigma", type=float, default=1.0)
+    ap.add_argument("--gate-kappa", type=float, default=0.0,
+                    help="with --gate soft: views with omega = q_T < kappa are discarded (language regime: 0.8)")
+    ap.add_argument("--view-kd-w", type=float, default=-1.0,
+                    help="weight of the distillation term on views (-1 = --kd-w); 0 + --view-ce 1 = hard labels only")
     ap.add_argument("--tau-g", type=float, default=0.75)
     ap.add_argument("--bn-views", type=int, default=0, help="1 = views update BN running stats")
     ap.add_argument("--pool-k", type=int, default=16, help="candidate pool size for agrK/disK/polK members")
@@ -781,6 +785,9 @@ def main():
                     q = torch.exp(-D / args.sigma)
                     if args.gate == "soft":  # agreement weight omega = q_T(v, x), no threshold (paper Sec. 3.2 direction)
                         w = torch.exp(-kl_teacher(tv, t_full[gi], args.T) / args.sigma)
+                        if args.gate_kappa > 0:  # verification threshold: discard views with q_T < kappa
+                            w = w * (w >= args.gate_kappa).float()
+                            stats["kept"] = stats.get("kept", 0.0) + (w > 0).float().sum().item()
                         stats["w"] = stats.get("w", 0.0) + w.sum().item()
                     else:
                         w = (q / args.tau_g).clamp(max=1.0) if args.gate == "on" else torch.ones_like(q)
@@ -788,7 +795,10 @@ def main():
                     if args.view_ce_mode == "valid":  # y_v: the image label is a valid target only if the view keeps it
                         ce_v = ce_v * (tv.argmax(1) == y[gi]).float()
                     tgt = t_full[gi] if args.view_target == "full" else tv
-                    per = args.view_ce * ce_v + args.kd_w * w * kd_per_sample(sv, tgt, args.T)
+                    vkw = args.kd_w if args.view_kd_w < 0 else args.view_kd_w
+                    per = args.view_ce * ce_v + vkw * w * kd_per_sample(sv, tgt, args.T)
+                    if args.gate == "soft" and args.gate_kappa > 0:  # a discarded view is dropped entirely (CE too)
+                        per = per * (w > 0).float()
                     if args.xview_w > 0:  # local-to-global: verified views (D <= eps) also match T(x), Lemma 1
                         ok = (D <= args.xview_eps).float()
                         per = per + args.xview_w * args.kd_w * ok * kd_per_sample(sv, t_full[gi], args.T)
@@ -818,7 +828,7 @@ def main():
                    loss=stats["loss"] / ns, l_full=stats["full"] / ns,
                    l_view=stats["view"] / ns,
                    train_acc=100.0 * stats["correct"] / (ns * args.bs),
-                   view_D=stats["D"] / nv, view_q=stats["q"] / nv, view_w=stats.get("w", nv) / nv, rand_iou_sal1=(getattr(args, "_iou", 0.0) / max(1, getattr(args, "_iou_n", 0))), xview_frac=stats["xok"] / nv,
+                   view_D=stats["D"] / nv, view_q=stats["q"] / nv, view_w=stats.get("w", nv) / nv, view_kept=stats.get("kept", nv) / nv, rand_iou_sal1=(getattr(args, "_iou", 0.0) / max(1, getattr(args, "_iou_n", 0))), xview_frac=stats["xok"] / nv,
                    view_frac=stats["nview"] / (ns * args.bs), view_size=stats["size"] / nv,
                    sec=time.time() - t0)
         log.write(json.dumps(rec) + "\n")
