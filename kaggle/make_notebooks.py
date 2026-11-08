@@ -36,32 +36,31 @@ pretrained {tp} teacher, then trains the {sp} student with **EP-KD for vision**,
 | teacher | `{t}`. The standard CRD teacher from [RepDistiller](https://github.com/HobbitLong/RepDistiller), test accuracy {tacc:.2f}%. If that server fails, the notebook uses the mirror in the [mdistiller](https://github.com/megvii-research/mdistiller) release. |
 | student | `{s}`, base learning rate {lr} (the CRD / DKD setting for this student) |
 | EP-KD | `--views 1 --view-cache 1 --view-set sal1,sal2,sal3 --view-rotate 1 --passes 3,3,3,1,1 --anchor 1 --milestones 48,144,192,210` |
-| KD (ours) | `--views 0 --milestones 150,180,210`, the same seeds. This is the "KD (ours)" row of the paper table; set `RUN_KD = False` to skip it. |
+| KD (ours) | `--views 0 --milestones 150,180,210`, the same seeds. Off by default (`RUN_KD = False`); set it to `True` for the "KD (ours)" row of the paper table. |
 | reported | the **best test epoch** of each run, as mean ± sd over seeds, and the EP-KD − KD difference paired by seed |
 
 **Kaggle settings (right panel):** Accelerator **GPU T4 x2**, Internet **on**. Then use **Save Version → Save & Run All
 (Commit)**, so that the run continues after you close the browser.
 
-**Sessions and resuming.** A Kaggle session ends after 12 h. Before that, the runner stops every job after
-`TIME_BUDGET_H` hours and saves its resumable state under `/kaggle/working/runs/`, which Kaggle keeps as the version
-output. If the summary at the end lists unfinished runs:
+**Resuming.** Every run saves a resumable state (`latest.pt`, after each epoch) under `/kaggle/working/runs/`. The
+runner has no time limit of its own; Kaggle ends a session after 12 h. If a version ends with unfinished runs and its
+output was saved:
 
 1. Open the notebook in the editor and choose **Add Input → Your Work → Notebooks**. Select this notebook, so that its
    latest output version is attached.
 2. Run **Save & Run All** again. The restore cell finds the previous `runs/` folder under `/kaggle/input`, and each run
    continues from its last finished epoch.
 
-The jobs run concurrently: `JOBS_PER_GPU` jobs on each GPU. The EP-KD jobs start first, and the KD jobs fill the free
-slots."""
+The jobs run concurrently: `JOBS_PER_GPU` jobs on each GPU. The EP-KD jobs start first; with `RUN_KD = True` the KD
+jobs fill the free slots."""
 
 CONFIG = """# ---- configuration ----
 TEACHER, STUDENT = "{t}", "{s}"
 TEACHER_ACC = {tacc}      # test accuracy of the teacher checkpoint (sanity check only)
 LR = {lr}                 # base learning rate (CRD / DKD setting for this student)
 SEEDS = [0, 1, 2]
-RUN_KD = True             # also train KD (ours) with the standard schedule, same seeds (paper table row + Delta)
+RUN_KD = False            # True: also train KD (ours) with the standard schedule, same seeds (paper table row + Delta)
 JOBS_PER_GPU = 2          # concurrent training processes per GPU (data and augmentation live on the GPU)
-TIME_BUDGET_H = 11.0      # stop and save before Kaggle's 12 h session limit
 REPO = "https://github.com/Soobiwan/epkd-vision.git"
 REPO_REF = "main"         # branch, tag or commit of epkd-vision
 EXTRA_ARGS = []          # extra train.py flags for every run, e.g. ["--epochs", "2"] for a smoke test
@@ -138,8 +137,7 @@ for prev in glob.glob(f"/kaggle/input/**/runs/{PAIR}_*", recursive=True):
         shutil.copytree(prev, dst)
         print(f"restored {os.path.basename(prev)} (epoch {progress(dst)[1]}, done={progress(dst)[0]}) from {prev}")"""
 
-RUN = """# Job runner: EP-KD (and KD) for every seed, JOBS_PER_GPU concurrent jobs per GPU, stopped at TIME_BUDGET_H
-import signal
+RUN = """# Job runner: EP-KD (and KD) for every seed, JOBS_PER_GPU concurrent jobs per GPU
 COMMON = ["--teacher", TEACHER, "--student", STUDENT, "--teacher-ckpt", TEACHER_CKPT,
           "--data-root", data, "--lr", str(LR)]
 METHODS = {"epkd": ["--views", "1", "--view-cache", "1", "--view-set", "sal1,sal2,sal3", "--view-rotate", "1",
@@ -156,7 +154,6 @@ def last_line(run_dir):
         return {}
 
 running = {}  # name -> (Popen, gpu, log file)
-deadline = T_START + TIME_BUDGET_H * 3600
 last_report = 0
 while pending or running:
     for name, (p, g, fh) in list(running.items()):
@@ -165,18 +162,6 @@ while pending or running:
             del running[name]
             r = last_line(os.path.join(OUT, name))
             print(f"[{time.strftime('%H:%M')}] {name} exited ({p.returncode}); epoch {r.get('epoch')} best {r.get('best')}", flush=True)
-    if time.time() > deadline:
-        print(f"time budget of {TIME_BUDGET_H} h reached: stopping {list(running)}; they resume from latest.pt", flush=True)
-        for p, g, fh in running.values():
-            p.send_signal(signal.SIGTERM)
-        for p, g, fh in running.values():
-            try:
-                p.wait(timeout=120)
-            except subprocess.TimeoutExpired:
-                p.kill()
-            fh.close()
-        running.clear()
-        break
     load = [sum(g == k for _, g, _ in running.values()) for k in range(N_GPU)]
     while pending and min(load) < JOBS_PER_GPU:
         g = load.index(min(load))
@@ -217,7 +202,7 @@ def best_of(run_dir):
     return best
 
 res, teacher_acc = {}, None
-for m in METHODS:
+for m in (METHODS if RUN_KD else ["epkd"]):
     for s in SEEDS:
         rd = os.path.join(OUT, f"{PAIR}_{m}_s{s}")
         if os.path.isdir(rd):
@@ -231,7 +216,7 @@ print(f"{PAIR}: teacher accuracy measured {teacher_acc} (expected {TEACHER_ACC})
 lines = [f"## {PAIR} (epkd-vision @ {COMMIT[:7]})", "", "| method | " + " | ".join(f"s{s}" for s in SEEDS) + " | mean ± sd |",
          "|---|" + "---|" * (len(SEEDS) + 1)]
 summary = dict(pair=PAIR, teacher=TEACHER, student=STUDENT, lr=LR, commit=COMMIT, teacher_acc=teacher_acc, runs={})
-for m in METHODS:
+for m in (METHODS if RUN_KD else ["epkd"]):
     cells, vals = [], []
     for s in SEEDS:
         r = res.get((m, s))
