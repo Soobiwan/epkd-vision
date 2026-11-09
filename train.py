@@ -756,6 +756,14 @@ def main(argv=None):
         st = torch.load(latest, map_location=dev, weights_only=False)
         student.load_state_dict(st["student"])
         opt.load_state_dict(st["opt"])
+        for g in opt.param_groups:  # the checkpoint's param groups carry its own fused/foreach flags (e.g. a run started
+            g["fused"], g["foreach"] = bool(args.fused_sgd), None  # without --cuda-graph): use this run's optimizer
+        for p in student.parameters():  # momentum buffers in the parameters' memory layout (channels_last), which the
+            buf = opt.state.get(p, {}).get("momentum_buffer")  # fused kernel requires; values unchanged
+            if buf is not None:
+                opt.state[p]["momentum_buffer"] = torch.empty_like(p).copy_(buf)
+            elif args.fused_sgd:
+                opt.state[p]["momentum_buffer"] = torch.zeros_like(p)
         scaler.load_state_dict(st["scaler"])
         start, best, best_ep = st["epoch"], st["best"], st["best_ep"]
         torch.set_rng_state(st["rng"].cpu())
