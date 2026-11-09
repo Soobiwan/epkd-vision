@@ -26,7 +26,7 @@ PAIRS = [  # the nine pairs of the VRM table (Zhang et al., ICCV 2025, Tab. 1)
     ("wrn_40_2", "ShuffleV1", 75.61, 0.01),
 ]
 EP = ["--views", "1", "--view-cache", "1", "--view-set", "sal1,sal2,sal3", "--view-rotate", "1",
-      "--passes", "3,3,3,1,1", "--anchor", "1", "--milestones", "48,144,192,210"]
+      "--passes", "3,3,3,1,1", "--anchor", "1", "--milestones", "48,144,192,210", "--cuda-graph", "1"]
 METHOD_ARGS = {"epkd": EP,
                "crld_epkd": EP + ["--method", "crld", "--bs", "64"],
                "vrm_epkd": EP + ["--method", "vrm", "--bs", "64"]}
@@ -152,7 +152,7 @@ for prev in glob.glob(f"/kaggle/input/**/runs/{PAIR}_*", recursive=True):
 RUN = """# Job runner: EP-KD (and KD) for every seed, JOBS_PER_GPU concurrent jobs per GPU
 COMMON = ["--teacher", TEACHER, "--student", STUDENT, "--teacher-ckpt", TEACHER_CKPT,
           "--data-root", data, "--lr", str(LR)]
-METHODS = {METHOD: {margs_py}, "kd": ["--views", "0", "--milestones", "150,180,210"]}
+METHODS = {METHOD: {margs_py}, "kd": ["--views", "0", "--milestones", "150,180,210", "--cuda-graph", "1"]}
 RUN_METHODS = [METHOD] + (["kd"] if RUN_KD and METHOD == "epkd" else [])
 jobs = [(m, s) for m in RUN_METHODS for s in SEEDS]  # the method first
 pending = [j for j in jobs if not progress(os.path.join(OUT, f"{PAIR}_{j[0]}_s{j[1]}"))[0]]

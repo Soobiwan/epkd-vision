@@ -107,8 +107,20 @@ def extract_view(x, r, c, s, view_type):
 
 
 # ----------------------------------------------------------------------------- models
+CL = torch.channels_last
+
+
+_FAST = {}  # id(model) -> torch.compile'd forward (--compile)
+
+
 def teacher_forward(t, x):
+    f = _FAST.get(id(t))
+    return f(x) if f is not None else _teacher_forward(t, x)
+
+
+def _teacher_forward(t, x):
     """Teacher forward (eval mode): logits and the pre-pool feature map used for CAM."""
+    x = x.contiguous(memory_format=CL)
     if isinstance(t, wrn.WideResNet):  # lean WRN path (the paper runs)
         out = t.block3(t.block2(t.block1(t.conv1(x))))
         f = t.relu(t.bn1(out))
@@ -118,7 +130,12 @@ def teacher_forward(t, x):
 
 
 def student_logits(s, x):
-    return s(x)[0]
+    f = _FAST.get(id(s))
+    return f(x) if f is not None else _student_logits(s, x)
+
+
+def _student_logits(s, x):
+    return s(x.contiguous(memory_format=CL))[0]
 
 
 def load_checkpoint(path):
@@ -592,7 +609,7 @@ def evaluate(model, xs, ys, aug, bs=1000):
     return 100.0 * correct / xs.size(0)
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", default="cifar100")
     ap.add_argument("--data-root", default="./data", help="folder with cifar-100-python/ or <dataset>_uint8.pt")
@@ -660,10 +677,14 @@ def main():
     ap.add_argument("--method", default="kd", choices=["kd", "crld", "vrm"],
                     help="distillation objective for the full image and the views: kd (paper), or the two-view CRLD (MM'24) /"
                          " VRM (ICCV'25) objectives, each on a weak and a RandAugment-strong copy (mvkd.py)")
+    ap.add_argument("--compile", default="none", choices=["none", "default", "reduce-overhead", "max-autotune-no-cudagraphs"])
+    ap.add_argument("--cuda-graph", type=int, default=0, help="1 = replay each training step as a CUDA graph (same computation)")
+    ap.add_argument("--cuda-graph-check", type=int, default=0, help="1 = verify each new graph against the eager step")
+    ap.add_argument("--fused-sgd", type=int, default=-1, help="fused SGD kernel (default: on with --cuda-graph)")
     ap.add_argument("--fm-aug", type=int, default=0, help="1 = function-matching augmentation (inception crop + mixup)")
     ap.add_argument("--fm-scale-min", type=float, default=0.08)
     ap.add_argument("--fm-mixup", type=float, default=1.0, help="mixup Beta(a, a); 0 = no mixup")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     args.milestones = [int(m) for m in args.milestones.split(",") if m]
     args.view_sizes = [int(s) for s in args.view_sizes.split(",")]
     args.cand_sizes = [int(s) for s in args.cand_sizes.split(",")]
@@ -672,6 +693,15 @@ def main():
     args.view_set = args.view_set.split(",")
     args.stage_view_sets = [v.split(",") for v in args.stage_view_sets.split(";") if v]
     args.stage_plan = build_stage_plan(args)
+    if args.fused_sgd < 0:
+        args.fused_sgd = args.cuda_graph
+    if args.cuda_graph:
+        bad = [f for f, on in (("--fm-aug", args.fm_aug), ("--rotate-mix", args.rotate_mix), ("--free-random", args.free_random),
+                               ("--size-sched random", args.size_sched == "random"),
+                               ("--view-cache 0 with views", args.views > 0 and not args.view_cache),
+                               ("--teacher none", args.teacher == "none")) if on]
+        if bad:
+            raise SystemExit(f"--cuda-graph does not support {', '.join(bad)}")
 
     os.makedirs(args.run_dir, exist_ok=True)
     torch.manual_seed(args.seed)
@@ -693,7 +723,7 @@ def main():
         teacher, t_acc = None, 0.0
         args.views = 0
     else:
-        teacher = build_model(args.teacher, meta["num_classes"]).to(dev)
+        teacher = build_model(args.teacher, meta["num_classes"]).to(dev, memory_format=CL)
         if args.teacher_ckpt is None:
             raise SystemExit("--teacher-ckpt is required unless --teacher none")
         ck = load_checkpoint(args.teacher_ckpt)
@@ -705,9 +735,20 @@ def main():
         teacher.eval()
     args.teacher = teacher
 
-    student = build_model(args.student, meta["num_classes"]).to(dev)
-    opt = torch.optim.SGD(student.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.wd)
+    student = build_model(args.student, meta["num_classes"]).to(dev, memory_format=CL)
+    if args.compile != "none":
+        import functools
+        torch._dynamo.config.cache_size_limit = 64
+        mode = None if args.compile == "default" else args.compile
+        for m, fn in ((teacher, _teacher_forward), (student, _student_logits)):
+            if m is not None:
+                _FAST[id(m)] = torch.compile(functools.partial(fn, m), mode=mode, dynamic=False)
+    opt = torch.optim.SGD(student.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.wd,
+                          **({"fused": True} if args.fused_sgd else {}))
     scaler = torch.amp.GradScaler("cuda", enabled=bool(args.amp))
+    if args.fused_sgd:  # momentum buffers start at 0 (first update 0.9 * 0 + g = g, as PyTorch's buf = g.clone()): the fused
+        for p in student.parameters():  # kernel leaves a new buffer uninitialised if GradScaler skips the very first step
+            opt.state[p]["momentum_buffer"] = torch.zeros_like(p)
 
     start, best, best_ep = 0, 0.0, -1
     latest = os.path.join(args.run_dir, "latest.pt")
@@ -730,10 +771,16 @@ def main():
     n = trx.size(0)
     steps_per_epoch = n // args.bs  # drop_last: every step is a full batch
     view_cache = None
+    stats = {k: torch.zeros((), device=dev) for k in
+             ("loss", "full", "view", "D", "q", "nview", "size", "correct", "xok", "w", "kept")}
+    graphs, warm, side = {}, {}, torch.cuda.Stream()
+    static_idx = torch.zeros(args.bs, dtype=torch.long, device=dev)
     for epoch in range(start, args.epochs):
         lr = lr_at(epoch, args)
         for g in opt.param_groups:
             g["lr"] = lr
+        if any(k[0] != lr for k in graphs):  # a captured SGD step has its learning rate baked in
+            graphs.clear()
         t0 = time.time()
         active = views_active(epoch, args, full)
         use_full = (not active) or args.anchor > 0  # without an anchor, restricted stages train on views only
@@ -744,15 +791,14 @@ def main():
             s_now = view_size_at(epoch, args)
             if view_cache is None or view_cache[2] != (s_now, tuple(args.view_set)):
                 view_cache = (s_now, build_view_cache(teacher, trx, try_, aug, s_now, args), (s_now, tuple(args.view_set)))
+                graphs.clear()  # captured graphs read the old cache
                 print(f"view cache: size {s_now}, members {args.view_set}", flush=True)
         args._iou, args._iou_n = 0.0, 0
-        stats = dict(loss=0.0, full=0.0, view=0.0, D=0.0, q=0.0, nview=0.0, size=0.0, correct=0, xok=0.0)
+        for v in stats.values():
+            v.zero_()
         rot_off = torch.randint(0, len(args.view_set), (n,), device=dev) if args.rotate_mix else None
-        for it in range(steps_per_epoch * n_pass):
-            if it % steps_per_epoch == 0:
-                perm = torch.randperm(n, device=dev)
-            j = it % steps_per_epoch
-            idx = perm[j * args.bs:(j + 1) * args.bs]
+        def train_step(idx, pass_idx):
+            """One optimisation step on batch idx. No host synchronisation, so it can be captured as a CUDA graph."""
             two_view = args.method != "kd"
             if two_view:  # CRLD / VRM data pipeline: weak = zero-pad crop + flip; strong = independent crop + flip + RandAugment
                 raw = trx[idx].float()
@@ -766,9 +812,11 @@ def main():
             y = try_[idx]
             if teacher is not None:
                 with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled=bool(args.amp)):
-                    t_full, feat = teacher_forward(teacher, x)
-                    if two_view:
-                        t_full_s = teacher_forward(teacher, x_s)[0].float()
+                    if two_view:  # weak and strong copies in one teacher batch (eval mode: per-sample identical)
+                        t_both, feat = teacher_forward(teacher, torch.cat([x, x_s]))
+                        t_full, t_full_s, feat = t_both[:x.size(0)], t_both[x.size(0):].float(), feat[:x.size(0)]
+                    else:
+                        t_full, feat = teacher_forward(teacher, x)
                 t_full = t_full.float()
             loss = 0.0
             if use_full and two_view:
@@ -777,8 +825,8 @@ def main():
                     s_full_s = student_logits(student, x_s)
                 l_full = mvkd.LOSSES[args.method](s_full, s_full_s, t_full, t_full_s, y)
                 loss = (args.anchor if active else 1.0) * l_full
-                stats["full"] += l_full.item()
-                stats["correct"] += (s_full.argmax(1) == y).sum().item()
+                stats["full"] += l_full.detach()
+                stats["correct"] += (s_full.argmax(1) == y).sum()
             elif use_full:
                 with torch.autocast("cuda", dtype=torch.float16, enabled=bool(args.amp)):
                     s_full = student_logits(student, x)
@@ -790,10 +838,10 @@ def main():
                         ce = fm_lam * ce + (1 - fm_lam) * F.cross_entropy(s_full.float(), y[fm_perm])
                     l_full = args.ce_w * ce + args.kd_w * kd_per_sample(s_full, t_full, args.T).mean()
                 loss = (args.anchor if active else 1.0) * l_full
-                stats["full"] += l_full.item()
-                stats["correct"] += (s_full.argmax(1) == y).sum().item()
+                stats["full"] += l_full.detach()
+                stats["correct"] += (s_full.argmax(1) == y).sum()
             if active:
-                cams = {"gt": cam_map(feat, classifier(teacher).weight, y, full)}
+                cams = {} if args.view_cache else {"gt": cam_map(feat, classifier(teacher).weight, y, full)}
                 confs = [m for m in args.view_set if m.startswith("conf")]
                 if confs:  # evidence behind the teacher's k-th ranked non-label class (conf = conf1 = runner-up)
                     ranked = t_full.scatter(1, y.view(-1, 1), float("-inf")).topk(max(int(m[4:] or 1) for m in confs), 1).indices
@@ -801,9 +849,9 @@ def main():
                         cams[m] = cam_map(feat, classifier(teacher).weight, ranked[:, int(m[4:] or 1) - 1], full)
                 if args.view_cache:
                     groups = make_cached_views(aug.normalize(trx[idx]), idx, t_full, view_cache[1], view_cache[0], args,
-                                               it // steps_per_epoch, rot_off)
+                                               pass_idx, rot_off)
                 else:
-                    groups = make_views(x, y, t_full, cams, epoch, args, full, pass_idx=it // steps_per_epoch)
+                    groups = make_views(x, y, t_full, cams, epoch, args, full, pass_idx=pass_idx)
                 l_view = 0.0
                 for s, gi, v, tv, D in groups:
                     if two_view:  # the method's objective on the view and on a RandAugment-strong copy of it
@@ -815,7 +863,7 @@ def main():
                             sv = student_logits(student, v)
                             sv_s = student_logits(student, v_s)
                         l_view = l_view + mvkd.LOSSES[args.method](sv, sv_s, tv, tv_s, y[gi]) * gi.numel() / x.size(0)  # view_w applied below
-                        stats["D"] += D.sum().item()
+                        stats["D"] += D.sum()
                         stats["nview"] += gi.numel()
                         stats["size"] += float(s * gi.numel()) if isinstance(s, int) else float(s.float().sum())
                         continue
@@ -828,8 +876,8 @@ def main():
                         w = torch.exp(-kl_teacher(tv, t_full[gi], args.T) / args.sigma)
                         if args.gate_kappa > 0:  # verification threshold: discard views with q_T < kappa
                             w = w * (w >= args.gate_kappa).float()
-                            stats["kept"] = stats.get("kept", 0.0) + (w > 0).float().sum().item()
-                        stats["w"] = stats.get("w", 0.0) + w.sum().item()
+                            stats["kept"] += (w > 0).float().sum()
+                        stats["w"] += w.sum()
                     else:
                         w = (q / args.tau_g).clamp(max=1.0) if args.gate == "on" else torch.ones_like(q)
                     ce_v = F.cross_entropy(sv.float(), y[gi], reduction="none")
@@ -843,34 +891,86 @@ def main():
                     if args.xview_w > 0:  # local-to-global: verified views (D <= eps) also match T(x), Lemma 1
                         ok = (D <= args.xview_eps).float()
                         per = per + args.xview_w * args.kd_w * ok * kd_per_sample(sv, t_full[gi], args.T)
-                        stats["xok"] += ok.sum().item()
+                        stats["xok"] += ok.sum()
                     l_view = l_view + per.sum() / x.size(0)
-                    stats["D"] += D.sum().item()
-                    stats["q"] += q.sum().item()
+                    stats["D"] += D.sum()
+                    stats["q"] += q.sum()
                     stats["nview"] += gi.numel()
                     stats["size"] += float(s * gi.numel()) if isinstance(s, int) else float(s.float().sum())
                 if groups:
                     loss = loss + args.view_w * l_view / (len(groups) if args.size_mode == "global" else 1)
-                    stats["view"] += float(l_view)
+                    stats["view"] += l_view.detach() if torch.is_tensor(l_view) else float(l_view)
             if not torch.is_tensor(loss):  # no full objective and no view in this batch
-                continue
+                return
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
-            stats["loss"] += loss.item()
+            stats["loss"] += loss.detach()
+
+        for it in range(steps_per_epoch * n_pass):
+            if it % steps_per_epoch == 0:
+                perm = torch.randperm(n, device=dev)
+            j = it % steps_per_epoch
+            idx = perm[j * args.bs:(j + 1) * args.bs]
+            pass_idx = it // steps_per_epoch
+            if not args.cuda_graph:
+                train_step(idx, pass_idx)
+            else:  # whole step (augmentation, teacher, student, loss, backward, SGD) replayed as one CUDA graph
+                key = (lr, active, use_full, view_cache[0] if (active and view_cache) else 0,
+                       pass_idx % len(args.view_set) if (active and args.view_rotate) else 0)
+                g = graphs.get(key)
+                if g is None and warm.get(key, 0) < 2:  # eager warm-up steps (real training steps): cudnn autotune, lazy state
+                    side.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(side):
+                        train_step(idx, pass_idx)
+                    torch.cuda.current_stream().wait_stream(side)
+                    warm[key] = warm.get(key, 0) + 1
+                else:
+                    static_idx.copy_(idx)
+                    if g is None:
+                        g = torch.cuda.CUDAGraph()
+                        opt.zero_grad(set_to_none=True)
+                        with torch.cuda.graph(g):
+                            train_step(static_idx, pass_idx)
+                        graphs[key] = g
+                        if args.cuda_graph_check:  # replay == eager step from the same state (model, SGD, scaler, RNG)
+                            def _snap():
+                                bufs = [t for t in list(student.parameters()) + list(student.buffers())]
+                                bufs += [st_["momentum_buffer"] for st_ in opt.state.values() if "momentum_buffer" in st_]
+                                bufs += [scaler._scale, scaler._growth_tracker] + list(stats.values())
+                                return bufs
+                            b0 = [t.detach().clone() for t in _snap()]
+                            rng = torch.cuda.get_rng_state()
+                            train_step(static_idx, pass_idx)
+                            e = [t.detach().clone() for t in _snap()]
+                            for t, v in zip(_snap(), b0):
+                                t.data.copy_(v)
+                            torch.cuda.set_rng_state(rng)
+                            g.replay()
+                            r = _snap()
+                            d = max(((a.float() - b.float()).abs().max().item() if a.numel() else 0.0) for a, b in zip(e, r))
+                            ch = max(((a.float() - b.float()).abs().max().item() if a.numel() else 0.0) for a, b in zip(e, b0))
+                            print(f"cuda-graph check {key}: max |eager - replay| = {d:.3g} (largest change in the step {ch:.3g})",
+                                  flush=True)
+                            continue
+                    g.replay()
+        st = {k: float(v) for k, v in stats.items()}  # one host sync per epoch
         acc = evaluate(student, tex, tey, aug)
         if acc > best:
             best, best_ep = acc, epoch + 1
             torch.save(student.state_dict(), os.path.join(args.run_dir, "best_test.pth"))
-        nv = max(1.0, stats["nview"])
+        nv = max(1.0, st["nview"])
         ns = steps_per_epoch * n_pass
         rec = dict(epoch=epoch + 1, lr=lr, test_acc=acc, best=best, best_epoch=best_ep, passes=n_pass,
-                   loss=stats["loss"] / ns, l_full=stats["full"] / ns,
-                   l_view=stats["view"] / ns,
-                   train_acc=100.0 * stats["correct"] / (ns * args.bs),
-                   view_D=stats["D"] / nv, view_q=stats["q"] / nv, view_w=stats.get("w", nv) / nv, view_kept=stats.get("kept", nv) / nv, rand_iou_sal1=(getattr(args, "_iou", 0.0) / max(1, getattr(args, "_iou_n", 0))), xview_frac=stats["xok"] / nv,
-                   view_frac=stats["nview"] / (ns * args.bs), view_size=stats["size"] / nv,
+                   loss=st["loss"] / ns, l_full=st["full"] / ns,
+                   l_view=st["view"] / ns,
+                   train_acc=100.0 * st["correct"] / (ns * args.bs),
+                   view_D=st["D"] / nv, view_q=st["q"] / nv,
+                   view_w=(st["w"] if args.gate == "soft" else nv) / nv,
+                   view_kept=(st["kept"] if (args.gate == "soft" and args.gate_kappa > 0) else nv) / nv,
+                   rand_iou_sal1=(getattr(args, "_iou", 0.0) / max(1, getattr(args, "_iou_n", 0))), xview_frac=st["xok"] / nv,
+                   view_frac=st["nview"] / (ns * args.bs), view_size=st["size"] / nv,
                    sec=time.time() - t0)
         log.write(json.dumps(rec) + "\n")
         log.flush()

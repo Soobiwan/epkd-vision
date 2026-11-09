@@ -28,6 +28,17 @@ AUGMENT_LIST = [("AutoContrast", 0, 1), ("Brightness", 0.05, 0.95), ("Color", 0.
 
 
 # ----------------------------------------------------------------------------- Pillow-equivalent operations
+_CONST = {}
+
+
+def _const(vals, device, dtype):
+    """Device constant, created once (a host-to-device copy is not allowed inside CUDA-graph capture)."""
+    key = (tuple(vals), str(device), dtype)
+    if key not in _CONST:
+        _CONST[key] = torch.tensor(vals, device=device, dtype=dtype)
+    return _CONST[key]
+
+
 def _blend(deg, img, v):
     """Image.blend(deg, img, v) for uint8 images: deg + v * (img - deg), rounded and clipped (ImagingBlend)."""
     out = deg + v.view(-1, 1, 1, 1) * (img - deg)
@@ -119,8 +130,7 @@ def solarize(img, v):
 
 def sharpness(img, v):
     """ImageEnhance.Sharpness: blend with ImageFilter.SMOOTH (3x3 kernel [1 1 1; 1 5 1; 1 1 1] / 13, border kept)."""
-    k = torch.ones(3, 3, device=img.device, dtype=img.dtype)
-    k[1, 1] = 5.0
+    k = _const((1.0, 1.0, 1.0, 1.0, 5.0, 1.0, 1.0, 1.0, 1.0), img.device, img.dtype).view(3, 3)
     k = (k / 13.0).view(1, 1, 3, 3).repeat(3, 1, 1, 1)
     sm = F.conv2d(img, k, groups=3)
     sm = (sm + 0.5).floor().clamp(0, 255)  # ImagingFilter rounds to uint8
@@ -209,7 +219,7 @@ def cutout(img, v, x0u, y0u):
     ar_y = torch.arange(h, device=img.device, dtype=img.dtype).view(1, h, 1)
     inside = ((ar_x >= x0.view(-1, 1, 1)) & (ar_x <= x1.view(-1, 1, 1).floor()) &
               (ar_y >= y0.view(-1, 1, 1)) & (ar_y <= y1.view(-1, 1, 1).floor()) & (v > 0).view(-1, 1, 1))
-    fill = torch.tensor(CUTOUT_FILL, device=img.device, dtype=img.dtype).view(1, 3, 1, 1)
+    fill = _const(CUTOUT_FILL, img.device, img.dtype).view(1, 3, 1, 1)
     return torch.where(inside.unsqueeze(1), fill.expand_as(img), img)
 
 
@@ -219,7 +229,7 @@ def randaugment(img, n=2, gen=None):
     out = img
     geo = ("Rotate", "ShearX", "ShearY", "TranslateX", "TranslateY")
     h, w = img.shape[-2:]
-    eye = torch.tensor([1.0, 0, 0, 0, 1.0, 0], device=dev, dtype=torch.float64).expand(bsz, 6)
+    eye = _const((1.0, 0, 0, 0, 1.0, 0), dev, torch.float64).expand(bsz, 6)
     for _ in range(n):
         choice = torch.randint(0, len(AUGMENT_LIST), (bsz,), device=dev, generator=gen)
         u = torch.rand(bsz, device=dev, generator=gen, dtype=torch.float64)

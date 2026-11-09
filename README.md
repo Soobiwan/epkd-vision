@@ -107,6 +107,15 @@ The 3 passes at the 16, 20 and 24 px stages give **2.2× the optimizer steps of 
 a full image plus a crop. Always compare against `--views 0 --passes 3,3,3,1,1` (KD with the same step budget)
 as well as standard KD.
 
+### Speed
+
+At batch 64 a step is limited by CPU kernel-launch overhead, not by the GPU. `--cuda-graph 1` records the whole step
+once per stage and learning rate, then replays it as one CUDA graph. The step covers the augmentation, the teacher,
+the student, the loss, the backward pass and fused SGD. The computation is the same:
+`--cuda-graph-check 1` verifies every new graph against the eager step from the same state, and the two match
+bitwise. On an RTX 2080 Ti it is about 5× faster per step (VRM + EP-KD: 114 → 23 ms). The Kaggle notebooks use it.
+`--compile default` adds about 10% more and is optional. Requires torch ≥ 2.3.
+
 ### Ablations
 
 `scripts/cifar100_ablations.sh` runs every ablation. Each one changes a single component of the EP-KD command.

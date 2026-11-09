@@ -1,4 +1,4 @@
-torch>=2.1
+torch>=2.3  # --cuda-graph uses the fused SGD kernel
 numpy
 pyarrow
 pillow
