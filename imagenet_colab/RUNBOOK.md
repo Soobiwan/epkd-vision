@@ -3,7 +3,7 @@
 ## Running from another PC (start here)
 The local PC only drives Colab: it creates the TPU VM, uploads this directory, and backs up the checkpoints and the
 proposal cache. All training runs on the VM. Two teacher-student pairs: `PAIR=F` ResNet34->ResNet18 (finished, best
-72.55 % at epoch 95) and `PAIR=E` ResNet50->MobileNetV1 (in progress; local backup at epoch 29).
+72.55 % at epoch 95) and `PAIR=E` ResNet50->MobileNetV1 (paused; local backup at epoch 30, val top-1 67.34 %).
 
 1. **Tools.** Install the Colab CLI (version 0.7.5 was used) and sign in once: running `colab usage` opens the Google login.
    Python 3 and GNU `tar`/`split`/`md5sum` must be on the PATH.
@@ -19,7 +19,7 @@ proposal cache. All training runs on the VM. Two teacher-student pairs: `PAIR=F`
    | `ref/model/imagenet_teachers/ResNet50_vanilla/resnet50-19c8e357.pth` | 102.5 MB | `14b7379e…df0d66` |
 
 4. **Backups to resume from (not in git; copy them by hand).** `backup_full_E/` (778 MB, MobileNetV1 run) holds
-   `cache_inc_001..028.tgz` (proposal cache), `cache_final`, `SMOKE_OK`, `incarnation` and `state.tgz` (checkpoints and
+   `cache_inc_001..028.tgz` (proposal cache), `cache_final`, `SMOKE_OK`, `incarnation` and `state.tgz` (checkpoint after epoch 30, and
    logs). Copy the whole directory to `imagenet_colab/backup_full_E/`. `backup_full/` (3.4 GB) is the finished ResNet18 run
    (`state_FINAL_R18.tgz` = final, best and epoch-80 checkpoints); it is only needed as an archive.
 5. **Do not edit the configs.** Their absolute data path (`/media/e12056/ASi/imagenet/data`) is a path on the VM, which
