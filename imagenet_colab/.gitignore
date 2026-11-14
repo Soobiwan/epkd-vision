@@ -1,0 +1,16 @@
+# Large or machine-local files: copy them by hand (see RUNBOOK.md, "Running from another PC")
+backup_full*/
+ref/model/imagenet_teachers/**/*.pth
+cache*/
+logs/
+runs*/
+pulled/
+tpu_dev_out/
+fable_vm_logs/
+__pycache__/
+*.pyc
+*.pt
+*.pth
+*.tgz
+*.part_*
+.fetch.*

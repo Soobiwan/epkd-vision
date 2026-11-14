@@ -1,0 +1,72 @@
+Metadata-Version: 2.4
+Name: tgsc-kd
+Version: 0.1.0
+Summary: Modular TGSC knowledge distillation training package extracted from the notebook.
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: numpy
+Requires-Dist: torch
+Requires-Dist: torchvision
+Requires-Dist: tqdm
+
+# TGSC KD Repo
+
+This repository is the modularized version of the original notebook. The training logic stays close to the notebook, but it is now split into labeled modules, a small CLI, and JSON configs that point at the teacher checkpoints already stored under `model/`.
+
+## Layout
+
+```text
+TGSC/
+├── configs/
+│   ├── resnet32x4_to_resnet8x4.json
+│   └── vgg13_to_vgg8.json
+├── model/
+│   ├── cifar_teachers/
+│   └── python/
+├── notebooks/
+│   └── cached_teacher_8.ipynb
+├── scripts/
+│   └── train.py
+└── src/tgsc_kd/
+    ├── cli.py
+    ├── config.py
+    ├── modeling.py
+    ├── tgsc.py
+    ├── trainer.py
+    └── utils.py
+```
+
+## What Changed
+
+- The original notebook is archived at `notebooks/cached_teacher_8.ipynb`.
+- Teacher and student model construction is handled through `src/tgsc_kd/modeling.py`.
+- The TGSC preprocessing and crop-cache logic lives in `src/tgsc_kd/tgsc.py`.
+- Training, evaluation, and KD loss code lives in `src/tgsc_kd/trainer.py`.
+- Configs are stored as labeled JSON files in `configs/`.
+- The old Kaggle checkpoint paths were replaced with local `model/cifar_teachers/...` paths.
+
+## Run
+
+Use the repo virtual environment:
+
+```bash
+.venv/bin/python scripts/train.py --config configs/vgg13_to_vgg8.json
+```
+
+Dry-run model and checkpoint wiring without starting training:
+
+```bash
+.venv/bin/python scripts/train.py --config configs/vgg13_to_vgg8.json --dry-run
+```
+
+List supported architectures:
+
+```bash
+.venv/bin/python scripts/train.py --list-models
+```
+
+## Notes
+
+- Teacher checkpoints are resolved from the local `model/cifar_teachers/` folder by default.
+- The CIFAR-100 dataset is still loaded through `torchvision.datasets.CIFAR100` and will download into `data/` if needed.
+- The mdistiller model definitions under `model/python/` are reused directly instead of being duplicated.

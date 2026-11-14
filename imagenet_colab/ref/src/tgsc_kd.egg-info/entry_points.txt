@@ -1,0 +1,2 @@
+[console_scripts]
+tgsc-train = tgsc_kd.cli:main

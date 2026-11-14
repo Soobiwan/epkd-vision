@@ -1,0 +1,144 @@
+{
+ "teacher_model": "RN50",
+ "teacher_checkpoint": "model/imagenet_teachers/ResNet50_vanilla/resnet50-19c8e357.pth",
+ "student_model": "MNv1",
+ "student_checkpoint": null,
+ "num_classes": 1000,
+ "data": {
+  "dataset_type": "imagenet_parquet",
+  "root": "./data",
+  "train_parquet_glob": "/media/e12056/ASi/imagenet/data/train-*.parquet",
+  "validation_parquet_glob": "/media/e12056/ASi/imagenet/data/validation-*.parquet",
+  "test_parquet_glob": "/media/e12056/ASi/imagenet/data/test-*.parquet",
+  "mean": [
+   0.485,
+   0.456,
+   0.406
+  ],
+  "std": [
+   0.229,
+   0.224,
+   0.225
+  ],
+  "batch_size": 128,
+  "train_batch_size": 512,
+  "train_gpu_batch_size": 32,
+  "val_batch_size": 64,
+  "num_workers": 2,
+  "pin_memory": false,
+  "analysis_resize_short": 256,
+  "eval_resize_short": 256,
+  "eval_crop_size": 224,
+  "max_train_samples": null,
+  "max_val_samples": null,
+  "stages": [
+   [
+    112,
+    20
+   ],
+   [
+    140,
+    20
+   ],
+   [
+    168,
+    20
+   ],
+   [
+    196,
+    20
+   ]
+  ]
+ },
+ "kd": {
+  "temperature": 1.0,
+  "ce_weight": 0.5,
+  "kd_weight": 0.5
+ },
+ "optim": {
+  "base_lr": 0.1,
+  "momentum": 0.9,
+  "weight_decay": 0.0001,
+  "lr_half_on_stage_change": false,
+  "milestones": [
+   30,
+   60,
+   90
+  ],
+  "milestone_gamma": 0.1,
+  "epoch_halving_interval": 10
+ },
+ "train": {
+  "epochs": 80,
+  "seed": 27,
+  "save_path": "/media/e12056/ASi/TGSC/imagenet_fix/runs/E1_rn50_mnv1_epkd_e001-080/student_best.pth",
+  "checkpoint_dir": "/media/e12056/ASi/TGSC/imagenet_fix/runs/E1_rn50_mnv1_epkd_e001-080",
+  "resume_path": null,
+  "log_every": 1,
+  "log_dir": "/media/e12056/ASi/TGSC/imagenet_fix/runs/E1_rn50_mnv1_epkd_e001-080/logs",
+  "run_name": "imagenet_fix_E1_rn50_mnv1_epkd_e001-080"
+ },
+ "tgsc": {
+  "precompute_batch_size": 256,
+  "precompute_workers": 6,
+  "use_gt_target": true,
+  "w_cam": 0.7,
+  "w_sal": 0.3,
+  "temp": 1.5,
+  "gamma": 1.2,
+  "pct_lo": 1.0,
+  "pct_hi": 99.0,
+  "stride": 56,
+  "k_per_img": 6,
+  "min_frac": 0.2,
+  "min_mean": 0.2,
+  "eval_chunk": 256,
+  "cache": true,
+  "cache_in_memory": false,
+  "cache_to_disk": true,
+  "cache_dir": "/media/e12056/ASi/TGSC/imagenet_fix/cache",
+  "cache_shard_size": 8192,
+  "candidate_stride": 56,
+  "dynamic_stride": true,
+  "dynamic_stride_power": 0.5,
+  "flip_prob": 0.5,
+  "aug_padding": 0,
+  "box_jitter_px": 10,
+  "top_k_crops": 3,
+  "low_k_crops": 0,
+  "score_high": 0.75,
+  "score_low": 0.35,
+  "easy_threshold": 0.75,
+  "hard_threshold": 0.25,
+  "difficulty_step": 0.05,
+  "edge_align_windows": true,
+  "view_selection": "saliency",
+  "kd_gate": "off",
+  "full_anchor": 1.0,
+  "full_anchor_frac": 1.0
+ },
+ "_provenance": {
+  "source_log": "/media/cvgl/data3/TGSC/logs/imagenet_rn50_to_mnv1_tgsc_kd_20260423T145707Z.json",
+  "changes": [
+   "tgsc.top_k_crops: 2 -> 3  (author decision: top-3 verified + lowest-2)",
+   "tgsc.edge_align_windows: '<unset>' -> True  (edge-aligned candidate windows: append a window flush with the image edge when the stride grid stops short)",
+   "data.stages: [[112, 20], [140, 20], [168, 20], [196, 20], [224, 20]] -> [[112, 20], [140, 20], [168, 20], [196, 20]]  (only epochs 1-80 are used; LR depends on epoch only, dynamic stride on min stage (112) -> identical)",
+   "train.epochs: 100 -> 80  (epochs 1-80 of the original 100-epoch plan)",
+   "train.checkpoint_dir: 'outputs/imagenet_rn50_to_mnv1' -> '/media/e12056/ASi/TGSC/imagenet_fix/runs/A1_rn50_mnv1_e001-080'  (new output location)",
+   "train.save_path: 'outputs/imagenet_rn50_to_mnv1/student_best.pth' -> '/media/e12056/ASi/TGSC/imagenet_fix/runs/A1_rn50_mnv1_e001-080/student_best.pth'  (new output location)",
+   "train.log_dir: 'logs' -> '/media/e12056/ASi/TGSC/imagenet_fix/runs/A1_rn50_mnv1_e001-080/logs'  (new output location)",
+   "train.run_name: 'imagenet_rn50_to_mnv1_tgsc_kd' -> 'imagenet_fix_A1_rn50_mnv1_e001-080'  (new run name)",
+   "tgsc.cache_dir: '.cache' -> '/media/e12056/ASi/TGSC/imagenet_fix/cache'  (fresh caches)",
+   "data.train_parquet_glob: 'data/data/train-*.parquet' -> '/media/e12056/ASi/imagenet/data/train-*.parquet'  (local copy of the same HF ImageNet parquet shards)",
+   "data.validation_parquet_glob: 'data/data/validation-*.parquet' -> '/media/e12056/ASi/imagenet/data/validation-*.parquet'  (local copy of the same HF ImageNet parquet shards)",
+   "data.test_parquet_glob: 'data/data/test-*.parquet' -> '/media/e12056/ASi/imagenet/data/test-*.parquet'  (local copy of the same HF ImageNet parquet shards)",
+   "tgsc.top_k_crops: 3 -> 3  (EP-KD for vision: top-3 teacher proposals)",
+   "tgsc.low_k_crops: 2 -> 0  (EP-KD for vision: no lowest-score views)",
+   "tgsc.view_selection: '<unset>' -> 'saliency'  (EP-KD for vision: proposals kept in teacher-saliency order (no composite-score ranking))",
+   "tgsc.kd_gate: '<unset>' -> 'off'  (EP-KD for vision: unit KD weight on every view)",
+   "tgsc.full_anchor: '<unset>' -> 1.0  (EP-KD for vision: full-image KD anchor at restricted stages)",
+   "tgsc.full_anchor_frac: '<unset>' -> 1.0  (EP-KD for vision: anchor for every source image)",
+   "derived from A1_rn50_mnv1_e001-080.json; outputs under runs/E1_rn50_mnv1_epkd_e001-080"
+  ]
+ }
+}

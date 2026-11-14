@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+src/tgsc_kd/__init__.py
+src/tgsc_kd/cli.py
+src/tgsc_kd/config.py
+src/tgsc_kd/logging_utils.py
+src/tgsc_kd/modeling.py
+src/tgsc_kd/tgsc.py
+src/tgsc_kd/trainer.py
+src/tgsc_kd/utils.py
+src/tgsc_kd.egg-info/PKG-INFO
+src/tgsc_kd.egg-info/SOURCES.txt
+src/tgsc_kd.egg-info/dependency_links.txt
+src/tgsc_kd.egg-info/entry_points.txt
+src/tgsc_kd.egg-info/requires.txt
+src/tgsc_kd.egg-info/top_level.txt
