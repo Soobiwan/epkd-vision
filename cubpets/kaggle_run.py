@@ -27,7 +27,6 @@ import signal
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.request
 import zipfile
 
@@ -146,8 +145,8 @@ class Teachers:
         try:
             with urllib.request.urlopen(f"{plan.RELEASE}/{f}.json", timeout=60) as r:
                 info = json.loads(r.read())
-        except (urllib.error.URLError, OSError, ValueError) as e:
-            log(f"teacher {ds}: not published yet ({getattr(e, 'code', e)}); polling every {self.poll_s} s")
+        except Exception as e:  # noqa: BLE001  404 = not published yet; network errors: try again at the next poll
+            log(f"teacher {ds}: not available yet ({getattr(e, 'code', e)}); polling every {self.poll_s} s")
             return None
         try:
             get_data.download(f"{plan.RELEASE}/{f}.pth", dst, info["sha256"])

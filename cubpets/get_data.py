@@ -83,7 +83,7 @@ def check(ds, path):
     return not bad
 
 
-def download(url, dst, sha, tries=5):
+def download(url, dst, sha, tries=8):
     if os.path.exists(dst) and sha256_file(dst) == sha:
         return
     for k in range(tries):
@@ -101,7 +101,7 @@ def download(url, dst, sha, tries=5):
             return
         except Exception as e:  # noqa: BLE001
             print(f"[get_data] download {url} failed ({e}); retry {k + 1}/{tries}", flush=True)
-            time.sleep(10 * (k + 1))
+            time.sleep(min(120, 15 * (k + 1)))
     raise SystemExit(f"could not download {url}")
 
 
