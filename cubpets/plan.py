@@ -2,11 +2,12 @@
 
 Run name: <dataset>_<pair>_<arm>_s<seed>, e.g. cub_sv2_prop_s0. Arms (only --view-set differs between the EP-KD arms):
   prop  EP-KD, the teacher's proposals (3 highest-CAM grid windows per stage)       --view-set sal1,sal2,sal3
-  rfix  EP-KD, 3 random grid windows drawn once per image and stage (fixed)        --view-set rnd1,rnd2,rnd3
+  frn   EP-KD, 3 grid-free random windows (uniform over all valid pixel offsets),   --view-set frn1,frn2,frn3
+        drawn once per image and stage and fixed for the stage (epkd2 runs {cub,pets}_frn_anc / frc_anc)
   low   EP-KD, the 3 least-salient grid windows                                    --view-set low1,low2,low3
   kd    plain KD, 240 epochs, LR x0.1 at 150/180/210                               --views 0
 The command lines are those of the WRN-40-2 -> WRN-40-1 CUB / Pets runs (epkd2/cubucf/make_jobs.sh, runs
-{cub,pets}_{prop_anc,rfix_anc,low_anc,kd}_s*) with the teacher / student / learning rate of the pair.
+{cub,pets}_{prop_anc,frn_anc,low_anc,kd}_s*) with the teacher / student / learning rate of the pair.
 """
 
 DATASETS = ("cub", "pets")
@@ -14,19 +15,19 @@ TEACHER = "resnet32x4"
 # pair -> (student, base LR). LR: the CRD / DKD setting for the student (0.01 for ShuffleNets, 0.05 otherwise).
 PAIRS = {"r8x4": ("resnet8x4", 0.05), "sv2": ("ShuffleV2", 0.01)}
 SEEDS = (0, 1, 2)
-ARMS = ("prop", "rfix", "low", "kd")
+ARMS = ("prop", "frn", "low", "kd")
 
 # epkd2/cubucf/make_jobs.sh: COM / A (the paper's 48-96 px ladder, grid stride 24, view pad 6)
 _EP = ["--view-sizes", "48,60,72,84,96", "--grid-stride", "24", "--view-pad", "6", "--view-cache", "1",
        "--view-rotate", "1", "--passes", "3,3,3,1,1", "--anchor", "1", "--milestones", "48,144,192,210", "--views", "1"]
 ARM_ARGS = {
     "prop": _EP + ["--view-set", "sal1,sal2,sal3"],
-    "rfix": _EP + ["--view-set", "rnd1,rnd2,rnd3"],
+    "frn": _EP + ["--view-set", "frn1,frn2,frn3"],
     "low": _EP + ["--view-set", "low1,low2,low3"],
     "kd": ["--views", "0"],
 }
 
-# Teacher checkpoints: GitHub release assets (state dict + json with sha256 and test accuracy)
+# Teacher checkpoints: GitHub release assets (best-test-epoch state dict + json with sha256 and test accuracy)
 RELEASE = "https://github.com/Soobiwan/epkd-vision/releases/download/cubpets-teachers"
 
 
@@ -67,22 +68,22 @@ def est_hours(name):
 # not-yet-started job of the other GPU's queue. Longest runs (CUB EP-KD) one per GPU; Pets KD / CUB KD fill the
 # GPUs of the shorter runs. Expected hours per GPU queue in the comments.
 NOTEBOOKS = {
-    "01": (["cub_sv2_prop_s0"], ["cub_sv2_rfix_s0"]),                                             # 9.2 | 9.2
+    "01": (["cub_sv2_prop_s0"], ["cub_sv2_frn_s0"]),                                             # 9.2 | 9.2
     "02": (["cub_sv2_low_s0"], ["cub_sv2_prop_s1"]),                                              # 9.2 | 9.2
-    "03": (["cub_sv2_rfix_s1"], ["cub_sv2_low_s1"]),                                              # 9.2 | 9.2
-    "04": (["cub_sv2_prop_s2"], ["cub_sv2_rfix_s2"]),                                             # 9.2 | 9.2
+    "03": (["cub_sv2_frn_s1"], ["cub_sv2_low_s1"]),                                              # 9.2 | 9.2
+    "04": (["cub_sv2_prop_s2"], ["cub_sv2_frn_s2"]),                                             # 9.2 | 9.2
     "05": (["cub_sv2_low_s2"], ["cub_r8x4_prop_s0"]),                                             # 9.2 | 7.2
-    "06": (["cub_r8x4_rfix_s0", "pets_sv2_kd_s0"], ["cub_r8x4_low_s0", "pets_sv2_kd_s1"]),        # 9.1 | 9.1
-    "07": (["cub_r8x4_prop_s1", "pets_sv2_kd_s2"], ["cub_r8x4_rfix_s1", "pets_r8x4_kd_s0"]),      # 9.1 | 8.7
+    "06": (["cub_r8x4_frn_s0", "pets_sv2_kd_s0"], ["cub_r8x4_low_s0", "pets_sv2_kd_s1"]),        # 9.1 | 9.1
+    "07": (["cub_r8x4_prop_s1", "pets_sv2_kd_s2"], ["cub_r8x4_frn_s1", "pets_r8x4_kd_s0"]),      # 9.1 | 8.7
     "08": (["cub_r8x4_low_s1", "pets_r8x4_kd_s1"], ["cub_r8x4_prop_s2", "pets_r8x4_kd_s2"]),      # 8.7 | 8.7
-    "09": (["cub_r8x4_rfix_s2"], ["cub_r8x4_low_s2"]),                                            # 7.2 | 7.2
-    "10": (["pets_sv2_prop_s0", "cub_sv2_kd_s0"], ["pets_sv2_rfix_s0", "cub_sv2_kd_s1"]),         # 8.7 | 8.7
+    "09": (["cub_r8x4_frn_s2"], ["cub_r8x4_low_s2"]),                                            # 7.2 | 7.2
+    "10": (["pets_sv2_prop_s0", "cub_sv2_kd_s0"], ["pets_sv2_frn_s0", "cub_sv2_kd_s1"]),         # 8.7 | 8.7
     "11": (["pets_sv2_low_s0", "cub_sv2_kd_s2"], ["pets_sv2_prop_s1", "cub_r8x4_kd_s0"]),         # 8.7 | 8.1
-    "12": (["pets_sv2_rfix_s1", "cub_r8x4_kd_s1"], ["pets_sv2_low_s1", "cub_r8x4_kd_s2"]),        # 8.1 | 8.1
-    "13": (["pets_sv2_prop_s2"], ["pets_sv2_rfix_s2"]),                                           # 5.6 | 5.6
+    "12": (["pets_sv2_frn_s1", "cub_r8x4_kd_s1"], ["pets_sv2_low_s1", "cub_r8x4_kd_s2"]),        # 8.1 | 8.1
+    "13": (["pets_sv2_prop_s2"], ["pets_sv2_frn_s2"]),                                           # 5.6 | 5.6
     "14": (["pets_sv2_low_s2"], ["pets_r8x4_prop_s0"]),                                           # 5.6 | 4.4
-    "15": (["pets_r8x4_rfix_s0", "pets_r8x4_low_s0"], ["pets_r8x4_prop_s1", "pets_r8x4_rfix_s1"]),  # 8.8 | 8.8
-    "16": (["pets_r8x4_low_s1", "pets_r8x4_prop_s2"], ["pets_r8x4_rfix_s2", "pets_r8x4_low_s2"]),  # 8.8 | 8.8
+    "15": (["pets_r8x4_frn_s0", "pets_r8x4_low_s0"], ["pets_r8x4_prop_s1", "pets_r8x4_frn_s1"]),  # 8.8 | 8.8
+    "16": (["pets_r8x4_low_s1", "pets_r8x4_prop_s2"], ["pets_r8x4_frn_s2", "pets_r8x4_low_s2"]),  # 8.8 | 8.8
 }
 
 

@@ -1,5 +1,5 @@
 """Generates kaggle/cubpets_NN.ipynb (NN = 01..16): the CUB-200 / Oxford-Pets view-rules table for the ResNet32x4
-teacher (students ResNet8x4 and ShuffleNetV2, arms prop / rfix / low / kd, seeds 0-2; 48 runs). Which runs each
+teacher (students ResNet8x4 and ShuffleNetV2, arms prop / frn / low / kd, seeds 0-2; 48 runs). Which runs each
 notebook trains is in cubpets/plan.py (NOTEBOOKS); all logic is in cubpets/kaggle_run.py, so a notebook is three
 cells: clone, run, summary. See kaggle/CUBPETS_README.md.
 
@@ -14,7 +14,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "cubpets"))
 import plan  # noqa: E402
 
-ARM = {"prop": "EP-KD, teacher proposals", "rfix": "EP-KD, random windows fixed per stage",
+ARM = {"prop": "EP-KD, teacher proposals", "frn": "EP-KD, grid-free random windows fixed per stage",
        "low": "EP-KD, least-salient windows", "kd": "KD"}
 DS = {"cub": "CUB-200", "pets": "Oxford-Pets"}
 PAIR = {"r8x4": "ResNet32x4 → ResNet8x4", "sv2": "ResNet32x4 → ShuffleNetV2"}
@@ -29,7 +29,7 @@ This notebook trains:
 |---|---|
 {rows}
 
-Expected wall time: **~{hours:.1f} h** (uncertain by about ±40 %; a time guard stops cleanly at 11.5 h).
+Expected wall time: **~{hours:.1f} h** (uncertain by about ±30 %; a time guard stops cleanly at 11.5 h).
 
 **Kaggle settings (right panel):** Accelerator **GPU T4 x2**, Internet **on**, no input needed. Then
 **Save Version → Save & Run All (Commit)**; the run continues after you close the browser.
@@ -88,7 +88,7 @@ def notebook(nb, ref):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ref", default="cubpets-v2")
+    ap.add_argument("--ref", default="cubpets-v3")
     a = ap.parse_args()
     for nb in plan.NOTEBOOKS:
         p = os.path.join(HERE, f"cubpets_{nb}.ipynb")

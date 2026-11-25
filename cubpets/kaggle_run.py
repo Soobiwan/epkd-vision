@@ -36,6 +36,18 @@ import get_data  # noqa: E402
 import plan  # noqa: E402
 
 T0 = time.time()
+# Run folders carry MARK = {"version": RUN_VERSION, "teacher_sha256": ...}. Only folders of this version are restored
+# (v3: frn arm + best-epoch teachers; v1/v2 runs used rnd windows and final-epoch teachers), and a folder whose teacher
+# differs from the current one is set aside (renamed *.stale<time>) and started over.
+RUN_VERSION = "v3"
+MARK = "cubpets_run.json"
+
+
+def compatible(run_dir):
+    try:
+        return json.load(open(os.path.join(run_dir, MARK))).get("version") == RUN_VERSION
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def log(msg):
@@ -77,8 +89,12 @@ def restore(names, runs_dir, search_root):
     for name in names:
         dst = os.path.join(runs_dir, name)
         for prev in glob.glob(os.path.join(search_root, "**", "runs", name), recursive=True):
-            if os.path.isdir(prev) and os.path.realpath(prev) != os.path.realpath(dst) \
-                    and progress(prev)[1] > progress(dst)[1]:
+            if not os.path.isdir(prev) or os.path.realpath(prev) == os.path.realpath(dst):
+                continue
+            if not compatible(prev):
+                log(f"ignored {prev}: not a {RUN_VERSION} run folder (no {MARK} with version {RUN_VERSION})")
+                continue
+            if progress(prev)[1] > progress(dst)[1]:
                 shutil.rmtree(dst, ignore_errors=True)
                 shutil.copytree(prev, dst)
                 log(f"restored {name} from {prev} (epoch {progress(dst)[1]}, done={progress(dst)[0]})")
@@ -99,6 +115,10 @@ def restore(names, runs_dir, search_root):
                 with zf.open(m) as src, open(p, "wb") as f:
                     shutil.copyfileobj(src, f)
             dst = os.path.join(runs_dir, name)
+            if not compatible(tmp):
+                log(f"ignored runs/{name} in {zp}: not a {RUN_VERSION} run folder")
+                shutil.rmtree(tmp, ignore_errors=True)
+                continue
             if progress(tmp)[1] > progress(dst)[1]:
                 shutil.rmtree(dst, ignore_errors=True)
                 os.replace(tmp, dst)
@@ -113,12 +133,18 @@ class Teachers:
 
     def __init__(self, tdir, local_dir=None, dummy=False, poll_s=120):
         self.tdir, self.local_dir, self.dummy, self.poll_s = tdir, local_dir, dummy, poll_s
-        self.path, self.info, self.last_try = {}, {}, {}
+        self.path, self.info, self.last_try, self.sha = {}, {}, {}, {}
         os.makedirs(tdir, exist_ok=True)
 
     def get(self, ds):
         if ds in self.path:
             return self.path[ds]
+        p = self._get(ds)
+        if p:
+            self.sha[ds] = get_data.sha256_file(p)
+        return p
+
+    def _get(self, ds):
         if time.time() - self.last_try.get(ds, 0) < self.poll_s:
             return None
         self.last_try[ds] = time.time()
@@ -175,7 +201,8 @@ def write_result(name, run_dir, res_dir, teachers, cmt):
     res = dict(run=name, dataset=ds, pair=pair, arm=arm, seed=seed, teacher=cfg.get("teacher_ckpt"),
                student=cfg.get("student"), best=done["best"], best_epoch=done["best_epoch"], final=done["final"],
                teacher_acc=cfg.get("teacher_acc"), teacher_info=teachers.info.get(ds), epochs=cfg.get("epochs"),
-               train_hours=sum(r.get("sec", 0) for r in recs.values()) / 3600, commit=cmt)
+               train_hours=sum(r.get("sec", 0) for r in recs.values()) / 3600, commit=cmt,
+               version=RUN_VERSION, teacher_sha256=teachers.sha.get(ds))
     os.makedirs(res_dir, exist_ok=True)
     json.dump(res, open(os.path.join(res_dir, name + ".json"), "w"), indent=1)
     return res
@@ -192,7 +219,7 @@ def summary(out):
               f"{(r['teacher_acc'] or 0):8.2f} {r['train_hours']:6.2f}")
     for rd in sorted(glob.glob(os.path.join(out, "runs", "*"))):
         n = os.path.basename(rd)
-        if n not in done and not n.startswith("."):
+        if n not in done and not n.startswith(".") and ".stale" not in n:
             r = last_rec(rd)
             print(f"{n:24s} unfinished: epoch {r.get('epoch', 0)}/240, best so far {r.get('best', 0):.2f}")
     return rows
@@ -281,7 +308,17 @@ def main():
     def launch(g, name):
         ds = plan.parse(name)[0]
         rd = os.path.join(runs_dir, name)
+        mark = dict(version=RUN_VERSION, teacher_sha256=teachers.sha[ds])
+        if os.path.exists(rd):
+            try:
+                old = json.load(open(os.path.join(rd, MARK)))
+            except Exception:  # noqa: BLE001
+                old = {}
+            if old != mark and (old or progress(rd)[1] > 0):
+                os.rename(rd, rd + f".stale{int(time.time())}")
+                log(f"GPU {g}: {name}: existing folder has {old or 'no marker'}, now {mark}: set aside, starting over")
         os.makedirs(rd, exist_ok=True)
+        json.dump(mark, open(os.path.join(rd, MARK), "w"))
         tries = int(open(os.path.join(rd, "tries")).read()) + 1 if os.path.exists(os.path.join(rd, "tries")) else 1
         open(os.path.join(rd, "tries"), "w").write(str(tries))
         args = plan.train_args(name, data_dir, teachers.path[ds]) + extra

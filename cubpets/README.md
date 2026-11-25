@@ -1,7 +1,7 @@
 # `cubpets/`: the code of the paper's CUB-200 / Oxford-Pets runs (96 px)
 
 This folder holds the trainer that produced the paper's CUB-200-2011 and Oxford-IIIT Pets results (the "do teacher
-proposals matter?" table: EP-KD with the teacher's proposals vs. random windows fixed per stage vs. least-salient
+proposals matter?" table: EP-KD with the teacher's proposals vs. grid-free random windows fixed per stage vs. least-salient
 windows vs. KD). It is a byte copy of that code. It is a separate trainer from the CIFAR / STL / Tiny-ImageNet
 `train.py` at the top of this repository, and its options and defaults differ from that one.
 
@@ -28,18 +28,23 @@ learning rate changed:
     S="--student resnet8x4 --lr 0.05"  |  "--student ShuffleV2 --lr 0.01"
     EP="--view-sizes 48,60,72,84,96 --grid-stride 24 --view-pad 6 --view-cache 1 --view-rotate 1 --passes 3,3,3,1,1 --anchor 1 --milestones 48,144,192,210 --views 1"
     prop: $P $S $EP --view-set sal1,sal2,sal3 --seed k
-    rfix: $P $S $EP --view-set rnd1,rnd2,rnd3 --seed k
+    frn:  $P $S $EP --view-set frn1,frn2,frn3 --seed k   (grid-free random windows, drawn once per image and stage)
     low:  $P $S $EP --view-set low1,low2,low3 --seed k
     kd:   $P $S --views 0 --seed k                      (240 epochs, LR x0.1 at 150/180/210)
 
     python cubpets/train.py <args> --run-dir runs/<ds>_<r8x4|sv2>_<arm>_s<k>
 
+The `frn` windows are built by the same code as in `epkd2/train.py` (block `n_frn` of `build_view_cache`: uniform
+pixel offsets, generator seeded by (seed, view size), drawn once per image and stage), the code that ran the WRN
+`{cub,pets}_frn_anc` runs (cubucf trainer `401b8805202d`, same 100-image chunks). Until tag `cubpets-v2` this arm was
+`rfix` (`--view-set rnd1,rnd2,rnd3`, random windows on the stride-24 grid); the author replaced it by `frn` on 11-25.
+
 The reported number is the best test accuracy (`done.json` "best"), as in the WRN table. The `final` value is also
 stored.
 
 Teachers: ResNet32x4 trained with cross-entropy from scratch, using the recipe of the WRN-40-2 teachers:
-`--teacher none --student resnet32x4 --bs 64 --epochs 240 --milestones 150,180,210`. Students load the last epoch
-(`final.pth`). The checkpoints are assets of the GitHub release
+`--teacher none --student resnet32x4 --bs 64 --epochs 240 --milestones 150,180,210`. Students load the best
+test epoch of the teacher (`best_test.pth`; the author's choice, 11-25). The checkpoints are assets of the GitHub release
 [`cubpets-teachers`](https://github.com/Soobiwan/epkd-vision/releases/tag/cubpets-teachers): `tea_<ds>_r32x4.pth`,
 with `tea_<ds>_r32x4.json` holding the sha256 and the test accuracy.
 

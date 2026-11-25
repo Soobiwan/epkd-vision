@@ -5,6 +5,8 @@
 Reads every cubpets/results/<run>.json (written by cubpets/kaggle_run.py) and every run folder with done.json +
 config.json (e.g. runs/<run>/ of a local copy), from folders (searched recursively) and from cubpets_*.zip files.
 If a run appears more than once, the copy with the most epochs logged wins (ties: the first found).
+Only v3 runs are counted (frn arm, best-epoch teachers): results with "version": "v3", or run folders with
+cubpets_run.json version v3. --any-version counts everything (e.g. the v1/v2 rfix / final-epoch-teacher runs).
 Prints, per dataset and pair, arm x (mean ± sd over seeds, n, Δ vs prop = mean of the per-seed differences on the
 seeds both arms have), and lists missing runs.
 """
@@ -19,7 +21,7 @@ import zipfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cubpets"))
 import plan  # noqa: E402
 
-ARM_LABEL = {"prop": "EP-KD (teacher proposals)", "rfix": "random windows, fixed per stage",
+ARM_LABEL = {"prop": "EP-KD (teacher proposals)", "frn": "random grid-free windows, fixed per stage",
              "low": "least-salient windows", "kd": "KD"}
 
 
@@ -28,8 +30,17 @@ def _from_run(name, done, cfg, n_ep):
                 teacher_acc=cfg.get("teacher_acc"), epochs=cfg.get("epochs"), n_ep=n_ep)
 
 
-def scan(paths):
+VERSION = "v3"
+
+
+def scan(paths, any_version=False):
     found = {}
+
+    def ok_mark(text):
+        try:
+            return any_version or json.loads(text).get("version") == VERSION
+        except Exception:  # noqa: BLE001
+            return any_version
 
     def add(r):
         try:
@@ -46,10 +57,12 @@ def scan(paths):
             for rp in glob.glob(os.path.join(p, "**", "results", "*.json"), recursive=True):
                 r = json.load(open(rp))
                 r["n_ep"] = r.get("epochs") or 0
-                add(r)
+                if any_version or r.get("version") == VERSION:
+                    add(r)
             for dp in glob.glob(os.path.join(p, "**", "done.json"), recursive=True):
                 d = os.path.dirname(dp)
-                if os.path.exists(os.path.join(d, "config.json")):
+                mk = os.path.join(d, "cubpets_run.json")
+                if os.path.exists(os.path.join(d, "config.json")) and ok_mark(open(mk).read() if os.path.exists(mk) else ""):
                     n = sum(1 for _ in open(os.path.join(d, "train.jsonl"))) if os.path.exists(
                         os.path.join(d, "train.jsonl")) else 0
                     add(_from_run(os.path.basename(d), json.load(open(dp)), json.load(open(os.path.join(d, "config.json"))), n))
@@ -62,7 +75,7 @@ def scan(paths):
             for m in names:
                 if m.endswith("/done.json"):
                     d = m[:-len("done.json")]
-                    if d + "config.json" in names:
+                    if d + "config.json" in names and ok_mark(zf.read(d + "cubpets_run.json") if d + "cubpets_run.json" in names else ""):
                         n = len(zf.read(d + "train.jsonl").splitlines()) if d + "train.jsonl" in names else 0
                         add(_from_run(d.rstrip("/").split("/")[-1], json.loads(zf.read(m)),
                                       json.loads(zf.read(d + "config.json")), n))
@@ -81,8 +94,9 @@ def main():
     ap.add_argument("paths", nargs="+")
     ap.add_argument("--metric", default="best", choices=["best", "final"])
     ap.add_argument("--csv", default="")
+    ap.add_argument("--any-version", action="store_true", help="also count v1/v2 runs (rfix arm, final-epoch teachers)")
     a = ap.parse_args()
-    found = scan(a.paths)
+    found = scan(a.paths, a.any_version)
     val = {}
     for name, r in found.items():
         ds, pair, arm, seed = plan.parse(name)
