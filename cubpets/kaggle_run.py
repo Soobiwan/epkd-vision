@@ -37,9 +37,9 @@ import plan  # noqa: E402
 
 T0 = time.time()
 # Run folders carry MARK = {"version": RUN_VERSION, "teacher_sha256": ...}. Only folders of this version are restored
-# (v3: frn arm + best-epoch teachers; v1/v2 runs used rnd windows and final-epoch teachers), and a folder whose teacher
+# (v4: strong teachers, release cubpets-teachers-v2; v3: frn arm + best-epoch teachers; v1/v2 runs used rnd windows and final-epoch teachers), and a folder whose teacher
 # differs from the current one is set aside (renamed *.stale<time>) and started over.
-RUN_VERSION = "v3"
+RUN_VERSION = "v4"
 MARK = "cubpets_run.json"
 
 

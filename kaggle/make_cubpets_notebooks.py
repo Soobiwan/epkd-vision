@@ -88,7 +88,7 @@ def notebook(nb, ref):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ref", default="cubpets-v3")
+    ap.add_argument("--ref", default="cubpets-v4")
     a = ap.parse_args()
     for nb in plan.NOTEBOOKS:
         p = os.path.join(HERE, f"cubpets_{nb}.ipynb")

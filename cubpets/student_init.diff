@@ -1,0 +1,20 @@
+--- a/cubpets/train.py	2026-11-25 12:08:06.178845386 +0500
++++ b/cubpets/train.py	2026-11-26 19:20:51.746784342 +0500
+@@ -622,6 +622,7 @@
+     ap.add_argument("--kd-w", type=float, default=0.9)
+     ap.add_argument("--amp", type=int, default=1)
+     ap.add_argument("--pretrained", type=int, default=0, help="1 = student starts from ImageNet weights (timm: models)")
++    ap.add_argument("--student-init", default="", help="strong_teacher (11-26): state dict the student starts from (e.g. the teacher itself)")
+     # EP-KD v2
+     ap.add_argument("--views", type=int, default=0, help="restricted views per image per step (0 = plain KD)")
+     ap.add_argument("--anchor", type=float, default=1.0, help="weight of the full-image objective")
+@@ -714,6 +715,9 @@
+     args.teacher = teacher
+ 
+     student = build_model(args.student, meta["num_classes"], pretrained=bool(args.pretrained)).to(dev)
++    if args.student_init and not os.path.exists(os.path.join(args.run_dir, "latest.pt")):
++        student.load_state_dict(torch.load(args.student_init, map_location="cpu"))
++        print(f"student initialised from {args.student_init}", flush=True)
+     opt = torch.optim.SGD(student.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.wd)
+     scaler = torch.amp.GradScaler("cuda", enabled=bool(args.amp))
+ 
