@@ -84,6 +84,12 @@ NOTEBOOKS = {
     "14": (["pets_sv2_low_s2"], ["pets_r8x4_prop_s0"]),                                           # 5.6 | 4.4
     "15": (["pets_r8x4_frn_s0", "pets_r8x4_low_s0"], ["pets_r8x4_prop_s1", "pets_r8x4_frn_s1"]),  # 8.8 | 8.8
     "16": (["pets_r8x4_low_s1", "pets_r8x4_prop_s2"], ["pets_r8x4_frn_s2", "pets_r8x4_low_s2"]),  # 8.8 | 8.8
+    # 11-27 rush notebooks (deadline 16:59 PKT): second seeds of the Pets cells and KD seeds 1-2, each GPU <= ~4.5 h on a
+    # T4 (Pets EP-KD ~3 h, CUB KD ~1.9 h, Pets KD ~1.2 h). They repeat runs of 01-16; _check() covers 01-16 only.
+    "17": (["pets_sv2_prop_s1", "pets_sv2_kd_s1"], ["pets_sv2_frn_s1", "pets_sv2_kd_s2"]),
+    "18": (["pets_sv2_low_s1", "pets_r8x4_kd_s1"], ["pets_r8x4_prop_s1", "pets_r8x4_kd_s2"]),
+    "19": (["pets_r8x4_frn_s1"], ["pets_r8x4_low_s1"]),
+    "20": (["cub_r8x4_kd_s1", "cub_sv2_kd_s1"], ["cub_r8x4_kd_s2", "cub_sv2_kd_s2"]),
 }
 
 
@@ -92,7 +98,7 @@ def all_runs():
 
 
 def _check():
-    got = sorted(n for q0, q1 in NOTEBOOKS.values() for n in q0 + q1)
+    got = sorted(n for k, (q0, q1) in NOTEBOOKS.items() if int(k) <= 16 for n in q0 + q1)
     assert got == sorted(all_runs()), set(all_runs()) ^ set(got)
 
 

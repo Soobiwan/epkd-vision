@@ -14,6 +14,14 @@ Nothing has to be uploaded or attached. Each notebook does the following:
    published yet, the notebook polls for it every 2 min and the GPU runs another job from its queue meanwhile (for
    example Pets KD while the CUB teacher is still training).
 
+## v5b (11-27 noon): rush notebooks 17-20 (same teachers, same run version v5)
+
+`cubpets_17` ... `cubpets_20` repeat runs of 01-16 so that a second seed of every Pets cell and seeds 1-2 of every KD cell
+finish before the deadline (each GPU queue about 4-4.5 h on a T4): 17 = Pets ShuffleV2 proposals / random seed 1 + Pets
+ShuffleV2 KD seeds 1-2; 18 = Pets ShuffleV2 least-salient seed 1, Pets ResNet8x4 proposals seed 1 + Pets ResNet8x4 KD
+seeds 1-2; 19 = Pets ResNet8x4 random / least-salient seed 1; 20 = CUB KD seeds 1-2 (both students). Start fresh, GPU T4 x2,
+Internet on, Save & Run All. Output folders are collected like those of 01-16.
+
 ## v5 (11-27 morning): teachers without label smoothing — start every notebook fresh, do NOT attach earlier output
 
 The v4 teachers (release `cubpets-teachers-v2`) were trained with label smoothing. Their logits are about 4x smaller
