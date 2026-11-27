@@ -5,8 +5,8 @@
 Reads every cubpets/results/<run>.json (written by cubpets/kaggle_run.py) and every run folder with done.json +
 config.json (e.g. runs/<run>/ of a local copy), from folders (searched recursively) and from cubpets_*.zip files.
 If a run appears more than once, the copy with the most epochs logged wins (ties: the first found).
-Only v4 runs are counted (strong teachers of release cubpets-teachers-v2, frn arm): results with "version": "v4", or run folders with
-cubpets_run.json version v4. --any-version counts everything (e.g. the v1/v2 rfix / final-epoch-teacher runs).
+Only v5 runs are counted (teachers of release cubpets-teachers-v3, frn arm): results with "version": "v5", or run folders with
+cubpets_run.json version v5. --any-version counts everything (e.g. the v1/v2 rfix / final-epoch-teacher runs).
 Prints, per dataset and pair, arm x (mean ± sd over seeds, n, Δ vs prop = mean of the per-seed differences on the
 seeds both arms have), and lists missing runs.
 """
@@ -30,7 +30,7 @@ def _from_run(name, done, cfg, n_ep):
                 teacher_acc=cfg.get("teacher_acc"), epochs=cfg.get("epochs"), n_ep=n_ep)
 
 
-VERSION = "v4"
+VERSION = "v5"
 
 
 def scan(paths, any_version=False):

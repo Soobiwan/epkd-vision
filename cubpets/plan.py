@@ -28,7 +28,7 @@ ARM_ARGS = {
 }
 
 # Teacher checkpoints: GitHub release assets (best-test-epoch state dict + json with sha256 and test accuracy)
-RELEASE = "https://github.com/Soobiwan/epkd-vision/releases/download/cubpets-teachers-v2"
+RELEASE = "https://github.com/Soobiwan/epkd-vision/releases/download/cubpets-teachers-v3"
 
 
 def teacher_file(ds):
