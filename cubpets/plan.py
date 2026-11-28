@@ -90,6 +90,12 @@ NOTEBOOKS = {
     "18": (["pets_sv2_low_s1", "pets_r8x4_kd_s1"], ["pets_r8x4_prop_s1", "pets_r8x4_kd_s2"]),
     "19": (["pets_r8x4_frn_s1"], ["pets_r8x4_low_s1"]),
     "20": (["cub_r8x4_kd_s1", "cub_sv2_kd_s1"], ["cub_r8x4_kd_s2", "cub_sv2_kd_s2"]),
+    # 11-28 (author: 4 Kaggle notebooks, done in 3-4 h; 17-20 run locally): Pets seed 2 of every EP-KD arm (~2.7-3.4 h on
+    # a T4) and three KD runs moved off the local queue.
+    "21": (["pets_sv2_prop_s2"], ["pets_sv2_frn_s2"]),
+    "22": (["pets_sv2_low_s2"], ["pets_r8x4_prop_s2"]),
+    "23": (["pets_r8x4_frn_s2"], ["pets_r8x4_low_s2"]),
+    "24": (["cub_sv2_kd_s2"], ["cub_r8x4_kd_s2", "pets_r8x4_kd_s2"]),
 }
 
 

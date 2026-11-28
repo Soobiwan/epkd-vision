@@ -14,6 +14,12 @@ Nothing has to be uploaded or attached. Each notebook does the following:
    published yet, the notebook polls for it every 2 min and the GPU runs another job from its queue meanwhile (for
    example Pets KD while the CUB teacher is still training).
 
+## v5c (11-28): notebooks 21-24 (same teachers, run version v5)
+
+Notebooks 17-20 are run locally. `cubpets_21` ... `cubpets_24`: Pets seed 2 of every EP-KD arm (21 = ShuffleV2 proposals /
+random, 22 = ShuffleV2 least-salient / ResNet8x4 proposals, 23 = ResNet8x4 random / least-salient) and KD (24 = CUB
+ShuffleV2 seed 2 | CUB ResNet8x4 seed 2 then Pets ResNet8x4 seed 2). About 3-3.7 h each on T4 x2. Start fresh, Internet on.
+
 ## v5b (11-27 noon): rush notebooks 17-20 (same teachers, same run version v5)
 
 `cubpets_17` ... `cubpets_20` repeat runs of 01-16 so that a second seed of every Pets cell and seeds 1-2 of every KD cell
